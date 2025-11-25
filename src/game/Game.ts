@@ -1561,9 +1561,9 @@ export class Game {
     const killCount = this.player.kills;
     const botsEliminated = this.bots.filter(b => !b.player.alive).length;
 
-    // Panel dimensions - taller to fit 3 buttons
-    const panelWidth = 400;
-    const panelHeight = 420;
+    // Panel dimensions - responsive for mobile
+    const panelWidth = this.isMobile ? Math.min(340, this.viewportWidth - 20) : 400;
+    const panelHeight = this.isMobile ? 380 : 420;
     const panelX = centerX - panelWidth / 2;
     const panelY = centerY - panelHeight / 2;
 
@@ -1576,31 +1576,41 @@ export class Game {
     ctx.fill();
     ctx.stroke();
 
-    // Title
+    // Title - responsive for mobile
     ctx.fillStyle = this.isVictory ? '#22c55e' : '#ef4444';
-    ctx.font = 'bold 48px monospace';
+    ctx.font = this.isMobile ? 'bold 36px monospace' : 'bold 48px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(this.isVictory ? 'VICTORY' : 'DEFEATED', centerX, panelY + 60);
+    ctx.fillText(this.isVictory ? 'VICTORY' : 'DEFEATED', centerX, panelY + (this.isMobile ? 45 : 60));
 
     // Subtitle
     ctx.fillStyle = '#94a3b8';
-    ctx.font = '18px monospace';
+    ctx.font = this.isMobile ? '14px monospace' : '18px monospace';
     ctx.fillText(
       this.isVictory ? 'The map is yours.' : 'Your campaign has ended.',
-      centerX, panelY + 90
+      centerX, panelY + (this.isMobile ? 70 : 90)
     );
 
-    // Stats section
-    const statsY = panelY + 130;
-    const rowHeight = 45;
+    // Stats section - responsive for mobile
+    const statsY = panelY + (this.isMobile ? 95 : 130);
+    const rowHeight = this.isMobile ? 38 : 45;
 
-    // Stats background rows
-    const stats = [
+    // Stats background rows - responsive labels for mobile
+    const stats = this.isMobile ? [
+      { label: 'Territory', value: `${territoryPercent.toFixed(1)}%` },
+      { label: 'Eliminated', value: `${botsEliminated}` },
+      { label: 'Your Kills', value: `${killCount}` },
+      { label: 'Time', value: timeStr }
+    ] : [
       { label: 'Territory Conquered', value: `${territoryPercent.toFixed(1)}%` },
       { label: 'Enemies Eliminated', value: `${botsEliminated}` },
       { label: 'Your Kills', value: `${killCount}` },
       { label: 'Mission Time', value: timeStr }
     ];
+
+    const statsRowHeight = this.isMobile ? 30 : 36;
+    const statsPadding = this.isMobile ? 12 : 20;
+    const statsFont = this.isMobile ? '12px monospace' : '14px monospace';
+    const statsFontBold = this.isMobile ? 'bold 12px monospace' : 'bold 14px monospace';
 
     stats.forEach((stat, i) => {
       const rowY = statsY + i * rowHeight;
@@ -1608,32 +1618,37 @@ export class Game {
       // Row background
       ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
       ctx.beginPath();
-      ctx.roundRect(panelX + 20, rowY, panelWidth - 40, 36, 6);
+      ctx.roundRect(panelX + statsPadding, rowY, panelWidth - statsPadding * 2, statsRowHeight, 6);
       ctx.fill();
 
       // Label
       ctx.fillStyle = '#94a3b8';
-      ctx.font = '14px monospace';
+      ctx.font = statsFont;
       ctx.textAlign = 'left';
-      ctx.fillText(stat.label, panelX + 35, rowY + 24);
+      ctx.fillText(stat.label, panelX + statsPadding + 12, rowY + (this.isMobile ? 20 : 24));
 
       // Value
       ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 14px monospace';
+      ctx.font = statsFontBold;
       ctx.textAlign = 'right';
-      ctx.fillText(stat.value, panelX + panelWidth - 35, rowY + 24);
+      ctx.fillText(stat.value, panelX + panelWidth - statsPadding - 12, rowY + (this.isMobile ? 20 : 24));
     });
 
-    // Difficulty buttons section
-    const btnY = panelY + panelHeight - 80;
-    const btnWidth = 110;
-    const btnHeight = 40;
-    const btnSpacing = 15;
+    // Difficulty buttons section - responsive for mobile
+    const btnY = panelY + panelHeight - (this.isMobile ? 70 : 80);
+    const btnWidth = this.isMobile ? Math.min(90, (panelWidth - 40) / 3 - 8) : 110;
+    const btnHeight = this.isMobile ? 36 : 40;
+    const btnSpacing = this.isMobile ? 8 : 15;
     const totalBtnWidth = btnWidth * 3 + btnSpacing * 2;
     const btnStartX = centerX - totalBtnWidth / 2;
 
     // Clear and rebuild button positions
     this.difficultyButtons = [];
+
+    // Button font sizes - smaller on mobile
+    const btnFont = this.isMobile ? 'bold 12px monospace' : 'bold 16px monospace';
+    const btnFontSmall = this.isMobile ? 'bold 10px monospace' : 'bold 14px monospace';
+    const btnTextY = btnY + (this.isMobile ? 23 : 26);
 
     // Easy button (green)
     const easyX = btnStartX;
@@ -1642,9 +1657,9 @@ export class Game {
     ctx.roundRect(easyX, btnY, btnWidth, btnHeight, 8);
     ctx.fill();
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 16px monospace';
+    ctx.font = btnFont;
     ctx.textAlign = 'center';
-    ctx.fillText('Easy', easyX + btnWidth / 2, btnY + 26);
+    ctx.fillText('Easy', easyX + btnWidth / 2, btnTextY);
     this.difficultyButtons.push({ x: easyX, y: btnY, w: btnWidth, h: btnHeight, difficulty: 'easy' });
 
     // Hard button (red)
@@ -1654,32 +1669,32 @@ export class Game {
     ctx.roundRect(hardX, btnY, btnWidth, btnHeight, 8);
     ctx.fill();
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 16px monospace';
-    ctx.fillText('Hard', hardX + btnWidth / 2, btnY + 26);
+    ctx.font = btnFont;
+    ctx.fillText('Hard', hardX + btnWidth / 2, btnTextY);
     this.difficultyButtons.push({ x: hardX, y: btnY, w: btnWidth, h: btnHeight, difficulty: 'hard' });
 
-    // Impossible button (red/purple)
+    // Impossible button (purple)
     const impossibleX = btnStartX + (btnWidth + btnSpacing) * 2;
     ctx.fillStyle = '#9333ea';
     ctx.beginPath();
     ctx.roundRect(impossibleX, btnY, btnWidth, btnHeight, 8);
     ctx.fill();
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 14px monospace';
-    ctx.fillText('Impossible', impossibleX + btnWidth / 2, btnY + 26);
+    ctx.font = btnFontSmall;
+    ctx.fillText(this.isMobile ? 'Imposs.' : 'Impossible', impossibleX + btnWidth / 2, btnTextY);
     this.difficultyButtons.push({ x: impossibleX, y: btnY, w: btnWidth, h: btnHeight, difficulty: 'impossible' });
 
     // Difficulty description
     ctx.fillStyle = '#64748b';
-    ctx.font = '12px monospace';
+    ctx.font = this.isMobile ? '10px monospace' : '12px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('Select difficulty to play again', centerX, panelY + panelHeight - 20);
+    ctx.fillText('Select difficulty to play again', centerX, panelY + panelHeight - (this.isMobile ? 15 : 20));
 
-    // How to Play button (small, top right of panel)
-    const howToPlayBtnW = 30;
-    const howToPlayBtnH = 30;
-    const howToPlayBtnX = panelX + panelWidth - howToPlayBtnW - 10;
-    const howToPlayBtnY = panelY + 10;
+    // How to Play button (small, top right of panel) - responsive for mobile
+    const howToPlayBtnW = this.isMobile ? 26 : 30;
+    const howToPlayBtnH = this.isMobile ? 26 : 30;
+    const howToPlayBtnX = panelX + panelWidth - howToPlayBtnW - (this.isMobile ? 8 : 10);
+    const howToPlayBtnY = panelY + (this.isMobile ? 8 : 10);
     this.howToPlayButton = { x: howToPlayBtnX, y: howToPlayBtnY, w: howToPlayBtnW, h: howToPlayBtnH };
 
     ctx.fillStyle = '#3b82f6';
@@ -1687,9 +1702,9 @@ export class Game {
     ctx.roundRect(howToPlayBtnX, howToPlayBtnY, howToPlayBtnW, howToPlayBtnH, 6);
     ctx.fill();
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 18px monospace';
+    ctx.font = this.isMobile ? 'bold 14px monospace' : 'bold 18px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('?', howToPlayBtnX + howToPlayBtnW / 2, howToPlayBtnY + 22);
+    ctx.fillText('?', howToPlayBtnX + howToPlayBtnW / 2, howToPlayBtnY + (this.isMobile ? 18 : 22));
 
     // Draw How to Play popup if open
     if (this.showHowToPlay) {
@@ -1701,18 +1716,26 @@ export class Game {
   }
 
   /**
-   * Draw the How to Play popup overlay
+   * Draw the How to Play popup overlay - responsive for mobile
    */
   private drawHowToPlayPopup(): void {
     const { ctx } = this;
     const centerX = this.viewportWidth / 2;
     const centerY = this.viewportHeight / 2;
 
-    // Popup dimensions
-    const popupWidth = 500;
-    const popupHeight = 520;
+    // Popup dimensions - responsive for mobile
+    const popupWidth = this.isMobile ? Math.min(320, this.viewportWidth - 20) : 500;
+    const popupHeight = this.isMobile ? Math.min(450, this.viewportHeight - 40) : 520;
     const popupX = centerX - popupWidth / 2;
     const popupY = centerY - popupHeight / 2;
+
+    // Font sizes - smaller on mobile
+    const titleFont = this.isMobile ? 'bold 22px monospace' : 'bold 32px monospace';
+    const sectionFont = this.isMobile ? 'bold 12px monospace' : 'bold 16px monospace';
+    const bodyFont = this.isMobile ? '11px monospace' : '14px monospace';
+    const lineHeight = this.isMobile ? 16 : 22;
+    const sectionGap = this.isMobile ? 8 : 15;
+    const padding = this.isMobile ? 15 : 25;
 
     // Darker backdrop
     ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
@@ -1729,15 +1752,15 @@ export class Game {
 
     // Title
     ctx.fillStyle = '#3b82f6';
-    ctx.font = 'bold 32px monospace';
+    ctx.font = titleFont;
     ctx.textAlign = 'center';
-    ctx.fillText('HOW TO PLAY', centerX, popupY + 45);
+    ctx.fillText('HOW TO PLAY', centerX, popupY + (this.isMobile ? 30 : 45));
 
     // Close button
-    const closeBtnW = 30;
-    const closeBtnH = 30;
-    const closeBtnX = popupX + popupWidth - closeBtnW - 10;
-    const closeBtnY = popupY + 10;
+    const closeBtnW = this.isMobile ? 26 : 30;
+    const closeBtnH = this.isMobile ? 26 : 30;
+    const closeBtnX = popupX + popupWidth - closeBtnW - 8;
+    const closeBtnY = popupY + 8;
     this.closeHowToPlayButton = { x: closeBtnX, y: closeBtnY, w: closeBtnW, h: closeBtnH };
 
     ctx.fillStyle = '#ef4444';
@@ -1745,31 +1768,32 @@ export class Game {
     ctx.roundRect(closeBtnX, closeBtnY, closeBtnW, closeBtnH, 6);
     ctx.fill();
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 20px monospace';
-    ctx.fillText('X', closeBtnX + closeBtnW / 2, closeBtnY + 22);
+    ctx.font = this.isMobile ? 'bold 16px monospace' : 'bold 20px monospace';
+    ctx.fillText('X', closeBtnX + closeBtnW / 2, closeBtnY + (this.isMobile ? 18 : 22));
 
     // Content sections
-    let y = popupY + 80;
-    const lineHeight = 22;
-    const sectionGap = 15;
+    let y = popupY + (this.isMobile ? 50 : 80);
 
     ctx.textAlign = 'left';
 
     // Controls section
     ctx.fillStyle = '#fbbf24';
-    ctx.font = 'bold 16px monospace';
-    ctx.fillText('CONTROLS', popupX + 25, y);
+    ctx.font = sectionFont;
+    ctx.fillText('CONTROLS', popupX + padding, y);
     y += lineHeight;
 
     ctx.fillStyle = '#e2e8f0';
-    ctx.font = '14px monospace';
-    const controls = [
+    ctx.font = bodyFont;
+    const controls = this.isMobile ? [
+      'Swipe to set direction',
+      'You move forward automatically'
+    ] : [
       'Desktop: Mouse aims direction, WASD/Arrows to steer',
       'Mobile: Swipe to set direction',
       'You always move forward automatically'
     ];
     for (const line of controls) {
-      ctx.fillText(line, popupX + 25, y);
+      ctx.fillText(line, popupX + padding, y);
       y += lineHeight;
     }
 
@@ -1777,13 +1801,19 @@ export class Game {
 
     // Gameplay section
     ctx.fillStyle = '#fbbf24';
-    ctx.font = 'bold 16px monospace';
-    ctx.fillText('GAMEPLAY', popupX + 25, y);
+    ctx.font = sectionFont;
+    ctx.fillText('GAMEPLAY', popupX + padding, y);
     y += lineHeight;
 
     ctx.fillStyle = '#e2e8f0';
-    ctx.font = '14px monospace';
-    const gameplay = [
+    ctx.font = bodyFont;
+    const gameplay = this.isMobile ? [
+      'Leave territory to draw a tail',
+      'Return home to capture area',
+      'Cross enemy tails to eliminate them',
+      'Avoid your own tail or walls!',
+      'Camping shrinks your land'
+    ] : [
       'Leave your territory to draw a tail',
       'Return home to capture the enclosed area',
       'Cross enemy tails to eliminate them and steal territory',
@@ -1791,7 +1821,7 @@ export class Game {
       'Stay outside your base - camping shrinks your land'
     ];
     for (const line of gameplay) {
-      ctx.fillText(line, popupX + 25, y);
+      ctx.fillText(line, popupX + padding, y);
       y += lineHeight;
     }
 
@@ -1799,18 +1829,21 @@ export class Game {
 
     // Power-ups section
     ctx.fillStyle = '#fbbf24';
-    ctx.font = 'bold 16px monospace';
-    ctx.fillText('POWER-UPS', popupX + 25, y);
+    ctx.font = sectionFont;
+    ctx.fillText('POWER-UPS', popupX + padding, y);
     y += lineHeight;
 
     ctx.fillStyle = '#e2e8f0';
-    ctx.font = '14px monospace';
-    const powerups = [
+    ctx.font = bodyFont;
+    const powerups = this.isMobile ? [
+      'Yellow orbs = 5s speed boost',
+      'Every 3 kills = speed boost'
+    ] : [
       'Collect yellow lightning orbs for 5s speed boost',
       'Every 3 kills also grants a 5s speed boost'
     ];
     for (const line of powerups) {
-      ctx.fillText(line, popupX + 25, y);
+      ctx.fillText(line, popupX + padding, y);
       y += lineHeight;
     }
 
@@ -1818,38 +1851,41 @@ export class Game {
 
     // Difficulty section
     ctx.fillStyle = '#fbbf24';
-    ctx.font = 'bold 16px monospace';
-    ctx.fillText('DIFFICULTY MODES', popupX + 25, y);
+    ctx.font = sectionFont;
+    ctx.fillText('DIFFICULTY MODES', popupX + padding, y);
     y += lineHeight;
 
+    const diffLabelOffset = this.isMobile ? 50 : 85;
+    const impLabelOffset = this.isMobile ? 70 : 130;
+
     ctx.fillStyle = '#22c55e';
-    ctx.font = 'bold 14px monospace';
-    ctx.fillText('Easy:', popupX + 25, y);
+    ctx.font = this.isMobile ? 'bold 11px monospace' : 'bold 14px monospace';
+    ctx.fillText('Easy:', popupX + padding, y);
     ctx.fillStyle = '#e2e8f0';
-    ctx.font = '14px monospace';
-    ctx.fillText('Slower bots, lower aggression', popupX + 85, y);
+    ctx.font = bodyFont;
+    ctx.fillText(this.isMobile ? 'Slower bots' : 'Slower bots, lower aggression', popupX + diffLabelOffset, y);
     y += lineHeight;
 
     ctx.fillStyle = '#ef4444';
-    ctx.font = 'bold 14px monospace';
-    ctx.fillText('Hard:', popupX + 25, y);
+    ctx.font = this.isMobile ? 'bold 11px monospace' : 'bold 14px monospace';
+    ctx.fillText('Hard:', popupX + padding, y);
     ctx.fillStyle = '#e2e8f0';
-    ctx.font = '14px monospace';
-    ctx.fillText('Fast reactions, bots hunt you', popupX + 85, y);
+    ctx.font = bodyFont;
+    ctx.fillText(this.isMobile ? 'Bots hunt you' : 'Fast reactions, bots hunt you', popupX + diffLabelOffset, y);
     y += lineHeight;
 
     ctx.fillStyle = '#9333ea';
-    ctx.font = 'bold 14px monospace';
-    ctx.fillText('Impossible:', popupX + 25, y);
+    ctx.font = this.isMobile ? 'bold 11px monospace' : 'bold 14px monospace';
+    ctx.fillText(this.isMobile ? 'Imposs:' : 'Impossible:', popupX + padding, y);
     ctx.fillStyle = '#e2e8f0';
-    ctx.font = '14px monospace';
-    ctx.fillText('2x bot speed, 2x shrink, no territory on kills', popupX + 130, y);
+    ctx.font = bodyFont;
+    ctx.fillText(this.isMobile ? '2x speed, no inheritance' : '2x bot speed, 2x shrink, no territory on kills', popupX + impLabelOffset, y);
 
     // Footer
     ctx.fillStyle = '#64748b';
-    ctx.font = '12px monospace';
+    ctx.font = this.isMobile ? '10px monospace' : '12px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('Click anywhere to close', centerX, popupY + popupHeight - 20);
+    ctx.fillText('Tap anywhere to close', centerX, popupY + popupHeight - 15);
   }
 
   /**
