@@ -1,7 +1,7 @@
 import { Player } from './Player';
 import { TerritoryMap } from './TerritoryMap';
 import { Vec2 } from './Vec2';
-import { BotAI } from './BotAI';
+import { BotAI, Difficulty } from './BotAI';
 import { gameConfig, derivedConfig } from './gameConfig';
 
 /**
@@ -76,6 +76,7 @@ export class Game {
   private gameStartTime: number = 0;
   private gameEndTime: number = 0;
   private maxTerritoryPercent: number = 0; // Track highest territory for defeat screen
+  private difficulty: Difficulty = 'easy'; // Current difficulty level
 
   // Win condition threshold (99.5% to avoid tiny unreachable pockets)
   private readonly winThreshold: number = 99.5;
@@ -225,8 +226,8 @@ export class Game {
       // Generate starting territory for bot (slightly smaller than player)
       this.territoryMap.generateStartingTerritory(startX, startY, botId, 8);
 
-      // Create bot AI
-      const botAI = new BotAI(botPlayer, this.territoryMap);
+      // Create bot AI with current difficulty
+      const botAI = new BotAI(botPlayer, this.territoryMap, this.difficulty);
       this.bots.push(botAI);
       this.allPlayers.push(botPlayer);
       this.wasInOwnTerritory.set(botId, true);
@@ -297,9 +298,10 @@ export class Game {
   private handleTouchStart(e: TouchEvent): void {
     e.preventDefault();
 
-    // Handle game over restart with tap
+    // Handle game over restart with tap (check for button clicks)
     if (this.gameOver) {
-      this.restartGame();
+      const touch = e.touches[0];
+      this.handleGameOverClick(touch.clientX, touch.clientY);
       return;
     }
 
@@ -308,6 +310,24 @@ export class Game {
     this.touchStartY = touch.clientY;
     this.useTouchSteering = true;
     this.useMouseSteering = false;
+  }
+
+  /**
+   * Handle click/tap on game over screen - check for difficulty button clicks
+   */
+  private handleGameOverClick(clickX: number, clickY: number): void {
+    // Check if a difficulty button was clicked
+    for (const btn of this.difficultyButtons) {
+      if (clickX >= btn.x && clickX <= btn.x + btn.w &&
+          clickY >= btn.y && clickY <= btn.y + btn.h) {
+        this.difficulty = btn.difficulty;
+        this.restartGame();
+        return;
+      }
+    }
+
+    // If no button was clicked, still restart with current difficulty
+    this.restartGame();
   }
 
   /**
@@ -362,10 +382,12 @@ export class Game {
       this.useMouseSteering = true;
     });
 
-    // Click handler for game over restart
-    this.canvas.addEventListener('click', () => {
+    // Click handler for game over restart (with difficulty selection)
+    this.canvas.addEventListener('click', (e) => {
       if (this.gameOver) {
-        this.restartGame();
+        const clickX = e.clientX;
+        const clickY = e.clientY;
+        this.handleGameOverClick(clickX, clickY);
       }
     });
 
@@ -1350,6 +1372,9 @@ export class Game {
     }
   }
 
+  // Store button positions for click detection
+  private difficultyButtons: { x: number; y: number; w: number; h: number; difficulty: Difficulty }[] = [];
+
   /**
    * Draw the victory or defeat overlay
    */
@@ -1374,9 +1399,9 @@ export class Game {
     const killCount = this.player.kills;
     const botsEliminated = this.bots.filter(b => !b.player.alive).length;
 
-    // Panel dimensions
+    // Panel dimensions - taller to fit 3 buttons
     const panelWidth = 400;
-    const panelHeight = 380;
+    const panelHeight = 420;
     const panelX = centerX - panelWidth / 2;
     const panelY = centerY - panelHeight / 2;
 
@@ -1405,7 +1430,7 @@ export class Game {
 
     // Stats section
     const statsY = panelY + 130;
-    const rowHeight = 50;
+    const rowHeight = 45;
 
     // Stats background rows
     const stats = [
@@ -1421,37 +1446,72 @@ export class Game {
       // Row background
       ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
       ctx.beginPath();
-      ctx.roundRect(panelX + 20, rowY, panelWidth - 40, 40, 6);
+      ctx.roundRect(panelX + 20, rowY, panelWidth - 40, 36, 6);
       ctx.fill();
 
       // Label
       ctx.fillStyle = '#94a3b8';
-      ctx.font = '16px monospace';
+      ctx.font = '14px monospace';
       ctx.textAlign = 'left';
-      ctx.fillText(stat.label, panelX + 35, rowY + 26);
+      ctx.fillText(stat.label, panelX + 35, rowY + 24);
 
       // Value
       ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 16px monospace';
+      ctx.font = 'bold 14px monospace';
       ctx.textAlign = 'right';
-      ctx.fillText(stat.value, panelX + panelWidth - 35, rowY + 26);
+      ctx.fillText(stat.value, panelX + panelWidth - 35, rowY + 24);
     });
 
-    // Restart button
-    const btnY = panelY + panelHeight - 60;
-    const btnWidth = 200;
-    const btnHeight = 45;
-    const btnX = centerX - btnWidth / 2;
+    // Difficulty buttons section
+    const btnY = panelY + panelHeight - 80;
+    const btnWidth = 110;
+    const btnHeight = 40;
+    const btnSpacing = 15;
+    const totalBtnWidth = btnWidth * 3 + btnSpacing * 2;
+    const btnStartX = centerX - totalBtnWidth / 2;
 
-    ctx.fillStyle = this.isVictory ? '#22c55e' : '#ef4444';
+    // Clear and rebuild button positions
+    this.difficultyButtons = [];
+
+    // Easy button (green)
+    const easyX = btnStartX;
+    ctx.fillStyle = '#22c55e';
     ctx.beginPath();
-    ctx.roundRect(btnX, btnY, btnWidth, btnHeight, 8);
+    ctx.roundRect(easyX, btnY, btnWidth, btnHeight, 8);
     ctx.fill();
-
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 18px monospace';
+    ctx.font = 'bold 16px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(this.isVictory ? 'New Campaign' : 'Try Again', centerX, btnY + 30);
+    ctx.fillText('Easy', easyX + btnWidth / 2, btnY + 26);
+    this.difficultyButtons.push({ x: easyX, y: btnY, w: btnWidth, h: btnHeight, difficulty: 'easy' });
+
+    // Medium button (yellow/orange)
+    const mediumX = btnStartX + btnWidth + btnSpacing;
+    ctx.fillStyle = '#f59e0b';
+    ctx.beginPath();
+    ctx.roundRect(mediumX, btnY, btnWidth, btnHeight, 8);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 16px monospace';
+    ctx.fillText('Medium', mediumX + btnWidth / 2, btnY + 26);
+    this.difficultyButtons.push({ x: mediumX, y: btnY, w: btnWidth, h: btnHeight, difficulty: 'medium' });
+
+    // Hard button (red)
+    const hardX = btnStartX + (btnWidth + btnSpacing) * 2;
+    ctx.fillStyle = '#ef4444';
+    ctx.beginPath();
+    ctx.roundRect(hardX, btnY, btnWidth, btnHeight, 8);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 16px monospace';
+    ctx.fillText('Hard', hardX + btnWidth / 2, btnY + 26);
+    this.difficultyButtons.push({ x: hardX, y: btnY, w: btnWidth, h: btnHeight, difficulty: 'hard' });
+
+    // Difficulty description
+    ctx.fillStyle = '#64748b';
+    ctx.font = '12px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('Select difficulty to play again', centerX, panelY + panelHeight - 20);
 
     // Reset text alignment
     ctx.textAlign = 'left';

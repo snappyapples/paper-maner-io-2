@@ -4,9 +4,15 @@ import { Vec2 } from './Vec2';
 import { derivedConfig, gameConfig } from './gameConfig';
 
 type BotState = 'expand' | 'harass' | 'retreat' | 'flee' | 'wander';
+export type Difficulty = 'easy' | 'medium' | 'hard';
 
 /**
  * BotAI - Controls a bot player with intelligent autonomous behavior
+ *
+ * Difficulty levels:
+ * - Easy: Current behavior, bots make mistakes
+ * - Medium: Smarter, more aggressive, better avoidance
+ * - Hard: Perfect avoidance, relentless human targeting, coordinated
  *
  * States:
  * - expand: Moving outward to capture neutral/enemy territory
@@ -20,6 +26,7 @@ export class BotAI {
   private territoryMap: TerritoryMap;
   private allPlayers: Player[] = [];
   private state: BotState = 'wander';
+  private difficulty: Difficulty = 'easy';
 
   // Target point for movement
   private targetX: number = 0;
@@ -32,26 +39,53 @@ export class BotAI {
   private decisionTimer: number = 0;
   private decisionInterval: number = 0.3; // Faster decisions for smarter behavior
 
-  // Personality traits (randomized per bot)
+  // Personality traits (adjusted by difficulty)
   private aggression: number; // 0-1, higher = more likely to harass
   private caution: number; // 0-1, higher = retreats earlier
   private maxTailLength: number;
   private expansionDistance: number;
+  private humanFocus: number; // 0-1, how much to prioritize human player
 
   // Danger tracking
   private dangerLevel: number = 0;
 
-  constructor(player: Player, territoryMap: TerritoryMap) {
+  constructor(player: Player, territoryMap: TerritoryMap, difficulty: Difficulty = 'easy') {
     this.player = player;
     this.territoryMap = territoryMap;
+    this.difficulty = difficulty;
 
-    // Give each bot unique personality - MORE AGGRESSIVE overall
-    this.aggression = 0.5 + Math.random() * 0.5; // 0.5 - 1.0 (much more aggressive)
-    this.caution = 0.25 + Math.random() * 0.35; // 0.25 - 0.6 (less cautious)
-    this.maxTailLength = 20 + Math.floor(Math.random() * 30); // 20-50 tail points (bolder)
-    this.expansionDistance = 100 + Math.random() * 150; // 100-250 pixels (ventures further)
+    // Personality varies by difficulty
+    if (difficulty === 'easy') {
+      this.aggression = 0.3 + Math.random() * 0.4; // 0.3 - 0.7
+      this.caution = 0.4 + Math.random() * 0.3; // 0.4 - 0.7 (more cautious)
+      this.maxTailLength = 15 + Math.floor(Math.random() * 20); // 15-35
+      this.expansionDistance = 80 + Math.random() * 100; // 80-180
+      this.humanFocus = 0.3; // Occasional human targeting
+      this.decisionInterval = 0.4; // Slower reactions
+    } else if (difficulty === 'medium') {
+      this.aggression = 0.5 + Math.random() * 0.4; // 0.5 - 0.9
+      this.caution = 0.3 + Math.random() * 0.3; // 0.3 - 0.6
+      this.maxTailLength = 20 + Math.floor(Math.random() * 30); // 20-50
+      this.expansionDistance = 100 + Math.random() * 150; // 100-250
+      this.humanFocus = 0.6; // Frequent human targeting
+      this.decisionInterval = 0.25; // Faster reactions
+    } else { // hard
+      this.aggression = 0.8 + Math.random() * 0.2; // 0.8 - 1.0
+      this.caution = 0.2 + Math.random() * 0.2; // 0.2 - 0.4 (bold)
+      this.maxTailLength = 30 + Math.floor(Math.random() * 40); // 30-70
+      this.expansionDistance = 150 + Math.random() * 200; // 150-350
+      this.humanFocus = 0.95; // Almost always target human
+      this.decisionInterval = 0.15; // Very fast reactions
+    }
 
     this.pickNewTarget();
+  }
+
+  /**
+   * Set difficulty level (can be changed mid-game)
+   */
+  setDifficulty(difficulty: Difficulty): void {
+    this.difficulty = difficulty;
   }
 
   /**
@@ -238,17 +272,32 @@ export class BotAI {
 
   /**
    * Find a good target to harass (prioritize human, then bots with tails)
-   * Much more aggressive - longer tails = higher priority target
+   * Difficulty affects targeting: Hard mode almost always hunts human
    */
   private findHarassTarget(): Player | null {
     let bestTarget: Player | null = null;
     let bestScore = 0;
+    const humanPlayer = this.allPlayers.find(p => p.id === 1);
+
+    // Hard mode: Almost always target human if they exist and are alive
+    if (this.difficulty === 'hard' && humanPlayer?.alive) {
+      // On hard, bots coordinate - if human has ANY tail, go for them
+      if (humanPlayer.tail.length > 0 || Math.random() < this.humanFocus) {
+        return humanPlayer;
+      }
+    }
 
     for (const other of this.allPlayers) {
       if (!other.alive || other.id === this.player.id) continue;
 
+      // Hard mode: Bots avoid targeting each other most of the time
+      if (this.difficulty === 'hard' && other.id !== 1) {
+        if (Math.random() > 0.1) continue; // 90% chance to skip other bots
+      }
+
       const dist = this.getDistanceTo(other);
-      if (dist > 600) continue; // Increased range - more aggressive pursuit
+      const maxRange = this.difficulty === 'hard' ? 800 : 600;
+      if (dist > maxRange) continue;
 
       let score = 0;
 
@@ -271,17 +320,19 @@ export class BotAI {
         }
       }
 
-      // Prioritize human player significantly
+      // Prioritize human player - amount varies by difficulty
       if (other.id === 1) {
-        score += 50;
+        const humanBonus = this.difficulty === 'hard' ? 200 :
+                          this.difficulty === 'medium' ? 80 : 50;
+        score += humanBonus;
         // Extra bonus if human has any tail at all
         if (other.tail.length > 0) {
-          score += 30;
+          score += this.difficulty === 'hard' ? 100 : 30;
         }
       }
 
       // Prefer closer targets
-      score += Math.max(0, (600 - dist) / 5);
+      score += Math.max(0, (maxRange - dist) / 5);
 
       // Prefer players with more territory (bigger reward)
       const theirTerritory = this.territoryMap.getOwnershipPercentage(other.id);
@@ -293,8 +344,10 @@ export class BotAI {
       }
     }
 
-    // Lower threshold to trigger harassment more often
-    return bestScore > 25 ? bestTarget : null;
+    // Threshold varies by difficulty
+    const threshold = this.difficulty === 'hard' ? 10 :
+                     this.difficulty === 'medium' ? 20 : 25;
+    return bestScore > threshold ? bestTarget : null;
   }
 
   /**
@@ -596,32 +649,126 @@ export class BotAI {
 
   /**
    * Avoid own tail by adjusting target if on collision course
+   * Hard mode: Perfect avoidance - checks multiple angles and distances
    */
   private avoidOwnTail(): void {
     if (this.player.tail.length < 5) return;
 
-    const lookAhead = 60;
+    // Look ahead distance varies by difficulty
+    const lookAhead = this.difficulty === 'hard' ? 100 :
+                     this.difficulty === 'medium' ? 80 : 60;
+    const collisionRadius = this.difficulty === 'hard' ? 50 :
+                           this.difficulty === 'medium' ? 40 : 35;
+
     const futureX = this.player.pos.x + this.player.dir.x * lookAhead;
     const futureY = this.player.pos.y + this.player.dir.y * lookAhead;
 
-    for (let i = 0; i < this.player.tail.length - 4; i++) {
-      const tailPoint = this.player.tail[i];
-      const dx = futureX - tailPoint.x;
-      const dy = futureY - tailPoint.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
+    // Hard mode: Check multiple lookahead distances
+    const checkDistances = this.difficulty === 'hard' ? [30, 60, 100, 150] : [lookAhead];
 
-      if (dist < 35) {
-        // Turn away from tail
-        const awayAngle = Math.atan2(
-          this.player.pos.y - tailPoint.y,
-          this.player.pos.x - tailPoint.x
-        );
-        this.targetX = this.player.pos.x + Math.cos(awayAngle) * 100;
-        this.targetY = this.player.pos.y + Math.sin(awayAngle) * 100;
-        this.clampTargetToArena();
-        return;
+    for (const checkDist of checkDistances) {
+      const checkX = this.player.pos.x + this.player.dir.x * checkDist;
+      const checkY = this.player.pos.y + this.player.dir.y * checkDist;
+
+      for (let i = 0; i < this.player.tail.length - 4; i++) {
+        const tailPoint = this.player.tail[i];
+        const dx = checkX - tailPoint.x;
+        const dy = checkY - tailPoint.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist < collisionRadius) {
+          // Turn away from tail
+          const awayAngle = Math.atan2(
+            this.player.pos.y - tailPoint.y,
+            this.player.pos.x - tailPoint.x
+          );
+
+          // Hard mode: Find the best escape direction
+          if (this.difficulty === 'hard') {
+            const bestAngle = this.findSafestAngle(awayAngle);
+            this.targetX = this.player.pos.x + Math.cos(bestAngle) * 150;
+            this.targetY = this.player.pos.y + Math.sin(bestAngle) * 150;
+          } else {
+            this.targetX = this.player.pos.x + Math.cos(awayAngle) * 100;
+            this.targetY = this.player.pos.y + Math.sin(awayAngle) * 100;
+          }
+          this.clampTargetToArena();
+          return;
+        }
       }
     }
+
+    // Hard mode: Also check line segments between tail points for more precise avoidance
+    if (this.difficulty === 'hard' || this.difficulty === 'medium') {
+      for (let i = 0; i < this.player.tail.length - 5; i++) {
+        const p1 = this.player.tail[i];
+        const p2 = this.player.tail[i + 1];
+        const distToSegment = this.pointToSegmentDistance(
+          futureX, futureY, p1.x, p1.y, p2.x, p2.y
+        );
+        if (distToSegment < collisionRadius * 0.8) {
+          // Turn perpendicular to segment
+          const segAngle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+          const perpAngle = segAngle + Math.PI / 2;
+          this.targetX = this.player.pos.x + Math.cos(perpAngle) * 120;
+          this.targetY = this.player.pos.y + Math.sin(perpAngle) * 120;
+          this.clampTargetToArena();
+          return;
+        }
+      }
+    }
+  }
+
+  /**
+   * Find the safest angle to turn to (hard mode helper)
+   */
+  private findSafestAngle(baseAngle: number): number {
+    let bestAngle = baseAngle;
+    let bestMinDist = 0;
+
+    // Check 8 angles around the base direction
+    for (let i = 0; i < 8; i++) {
+      const testAngle = baseAngle + (i - 4) * (Math.PI / 8);
+      const testX = this.player.pos.x + Math.cos(testAngle) * 100;
+      const testY = this.player.pos.y + Math.sin(testAngle) * 100;
+
+      // Find minimum distance to any tail point
+      let minDist = Infinity;
+      for (const tailPoint of this.player.tail) {
+        const dx = testX - tailPoint.x;
+        const dy = testY - tailPoint.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < minDist) minDist = dist;
+      }
+
+      if (minDist > bestMinDist) {
+        bestMinDist = minDist;
+        bestAngle = testAngle;
+      }
+    }
+
+    return bestAngle;
+  }
+
+  /**
+   * Calculate distance from point to line segment
+   */
+  private pointToSegmentDistance(px: number, py: number,
+    x1: number, y1: number, x2: number, y2: number): number {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const lenSq = dx * dx + dy * dy;
+
+    if (lenSq === 0) {
+      return Math.sqrt((px - x1) * (px - x1) + (py - y1) * (py - y1));
+    }
+
+    let t = ((px - x1) * dx + (py - y1) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+
+    const projX = x1 + t * dx;
+    const projY = y1 + t * dy;
+    return Math.sqrt((px - projX) * (px - projX) + (py - projY) * (py - projY));
   }
 
   /**
