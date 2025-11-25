@@ -41,6 +41,15 @@ export class Game {
   // Input state
   private keys: Set<string> = new Set();
   private useMouseSteering: boolean = true; // Toggle between mouse and keyboard
+  private useTouchSteering: boolean = false; // Touch/swipe input mode
+
+  // Touch state for swipe detection
+  private touchStartX: number = 0;
+  private touchStartY: number = 0;
+
+  // Mobile detection and HUD scaling
+  private isMobile: boolean = false;
+  private hudScale: number = 1.0;
 
   // Game loop
   private lastTime: number = 0;
@@ -52,6 +61,9 @@ export class Game {
   private boundKeyDown: (e: KeyboardEvent) => void;
   private boundKeyUp: (e: KeyboardEvent) => void;
   private boundResize: () => void;
+  private boundTouchStart: (e: TouchEvent) => void;
+  private boundTouchMove: (e: TouchEvent) => void;
+  private boundTouchEnd: (e: TouchEvent) => void;
 
   // Camping mechanic state (per player)
   private campingTimers: Map<number, number> = new Map(); // playerId -> camping time
@@ -120,6 +132,12 @@ export class Game {
     this.boundKeyDown = this.handleKeyDown.bind(this);
     this.boundKeyUp = this.handleKeyUp.bind(this);
     this.boundResize = this.resizeCanvas.bind(this);
+    this.boundTouchStart = this.handleTouchStart.bind(this);
+    this.boundTouchMove = this.handleTouchMove.bind(this);
+    this.boundTouchEnd = this.handleTouchEnd.bind(this);
+
+    // Detect mobile and set HUD scale
+    this.updateMobileState();
 
     this.setupInputHandlers();
   }
@@ -231,6 +249,15 @@ export class Game {
     this.canvas.height = window.innerHeight;
     this.viewportWidth = window.innerWidth;
     this.viewportHeight = window.innerHeight;
+    this.updateMobileState();
+  }
+
+  /**
+   * Detect mobile device and set HUD scale accordingly
+   */
+  private updateMobileState(): void {
+    this.isMobile = this.viewportWidth < 768 || 'ontouchstart' in window;
+    this.hudScale = this.isMobile ? 0.6 : 1.0;
   }
 
   /**
@@ -264,6 +291,59 @@ export class Game {
   }
 
   /**
+   * Handle touch start for swipe controls
+   */
+  private handleTouchStart(e: TouchEvent): void {
+    e.preventDefault();
+
+    // Handle game over restart with tap
+    if (this.gameOver) {
+      this.restartGame();
+      return;
+    }
+
+    const touch = e.touches[0];
+    this.touchStartX = touch.clientX;
+    this.touchStartY = touch.clientY;
+    this.useTouchSteering = true;
+    this.useMouseSteering = false;
+  }
+
+  /**
+   * Handle touch move for swipe-to-set-direction
+   */
+  private handleTouchMove(e: TouchEvent): void {
+    e.preventDefault();
+    if (!this.useTouchSteering) return;
+
+    const touch = e.touches[0];
+    const dx = touch.clientX - this.touchStartX;
+    const dy = touch.clientY - this.touchStartY;
+
+    // Minimum swipe distance threshold
+    const minDistance = 20;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    if (distance > minDistance) {
+      // Set player direction based on swipe angle
+      const angle = Math.atan2(dy, dx);
+      this.player.targetAngle = angle;
+
+      // Update start point for continuous swiping
+      this.touchStartX = touch.clientX;
+      this.touchStartY = touch.clientY;
+    }
+  }
+
+  /**
+   * Handle touch end
+   */
+  private handleTouchEnd(e: TouchEvent): void {
+    e.preventDefault();
+    // Player keeps moving in last set direction (no action needed)
+  }
+
+  /**
    * Set up mouse and keyboard event handlers
    */
   private setupInputHandlers(): void {
@@ -291,6 +371,11 @@ export class Game {
     // Keyboard events
     window.addEventListener('keydown', this.boundKeyDown);
     window.addEventListener('keyup', this.boundKeyUp);
+
+    // Touch events for mobile swipe controls
+    this.canvas.addEventListener('touchstart', this.boundTouchStart, { passive: false });
+    this.canvas.addEventListener('touchmove', this.boundTouchMove, { passive: false });
+    this.canvas.addEventListener('touchend', this.boundTouchEnd, { passive: false });
 
     // Window resize
     window.addEventListener('resize', this.boundResize);
@@ -1689,17 +1774,22 @@ export class Game {
     // Boost indicator (left side, above camping indicator)
     this.drawBoostIndicator();
 
-    // Control mode indicator (bottom-left)
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.roundRect(15, this.viewportHeight - 50, 225, 36, 9);
-    ctx.fill();
-    ctx.stroke();
-    ctx.fillStyle = '#94a3b8';
-    ctx.font = '18px monospace';
-    ctx.fillText(`[${this.useMouseSteering ? 'MOUSE' : 'KEYBOARD'}]`, 24, this.viewportHeight - 24);
+    // Control mode indicator (bottom-left) - hide on mobile
+    if (!this.isMobile) {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(15, this.viewportHeight - 50, 225, 36, 9);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '18px monospace';
+      let mode = 'KEYBOARD';
+      if (this.useTouchSteering) mode = 'TOUCH';
+      else if (this.useMouseSteering) mode = 'MOUSE';
+      ctx.fillText(`[${mode}]`, 24, this.viewportHeight - 24);
+    }
   }
 
   /**
@@ -1713,32 +1803,34 @@ export class Game {
     if (campingTime <= 0) return;
 
     const { ctx } = this;
+    const scale = this.hudScale;
     const threshold = gameConfig.shrink.campingThreshold;
     const progress = Math.min(campingTime / threshold, 1);
 
-    const x = 15;
-    const y = this.viewportHeight - 100;
-    const barWidth = 180;
-    const barHeight = 24;
+    const x = 10;
+    const barWidth = this.isMobile ? 110 : 180;
+    const barHeight = Math.floor(24 * scale);
+    // On mobile, position above mini-map (bottom-left)
+    const y = this.isMobile ? this.viewportHeight - 55 : this.viewportHeight - 100;
 
     // Background
     ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
     ctx.strokeStyle = isShrinking ? 'rgba(255, 100, 100, 0.8)' : 'rgba(255, 255, 255, 0.2)';
     ctx.lineWidth = isShrinking ? 2 : 1;
     ctx.beginPath();
-    ctx.roundRect(x, y, barWidth + 30, barHeight + 20, 9);
+    ctx.roundRect(x, y, barWidth + 20 * scale, barHeight + 16 * scale, 6 * scale);
     ctx.fill();
     ctx.stroke();
 
     // Label
     ctx.fillStyle = isShrinking ? '#ff6b6b' : '#94a3b8';
-    ctx.font = 'bold 12px monospace';
-    ctx.fillText(isShrinking ? 'SHRINKING!' : 'CAMPING', x + 10, y + 15);
+    ctx.font = `bold ${Math.floor(10 * scale)}px monospace`;
+    ctx.fillText(isShrinking ? 'SHRINKING!' : 'CAMPING', x + 8 * scale, y + 12 * scale);
 
     // Progress bar background
     ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
     ctx.beginPath();
-    ctx.roundRect(x + 10, y + 22, barWidth, 12, 4);
+    ctx.roundRect(x + 8 * scale, y + 18 * scale, barWidth, 10 * scale, 3 * scale);
     ctx.fill();
 
     // Progress bar fill - color changes from green to yellow to red
@@ -1759,7 +1851,7 @@ export class Game {
 
     ctx.fillStyle = barColor;
     ctx.beginPath();
-    ctx.roundRect(x + 10, y + 22, barWidth * progress, 12, 4);
+    ctx.roundRect(x + 8 * scale, y + 18 * scale, barWidth * progress, 10 * scale, 3 * scale);
     ctx.fill();
   }
 
@@ -1768,63 +1860,65 @@ export class Game {
    */
   private drawBoostIndicator(): void {
     const { ctx } = this;
-    const hasBooost = this.isPlayerBoosted(1);
+    const scale = this.hudScale;
+    const hasBoost = this.isPlayerBoosted(1);
     const killsUntilBoost = 3 - (this.player.kills % 3);
     const boostTimeRemaining = this.getBoostTimeRemaining(1);
 
     // Position above camping indicator
-    const x = 15;
-    const y = this.viewportHeight - 160;
-    const barWidth = 180;
-    const barHeight = 24;
+    const x = 10;
+    const barWidth = this.isMobile ? 110 : 180;
+    const barHeight = Math.floor(24 * scale);
+    // On mobile, position above camping indicator (stacked bottom-left)
+    const y = this.isMobile ? this.viewportHeight - 100 : this.viewportHeight - 160;
 
     // Background
     ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-    ctx.strokeStyle = hasBooost ? 'rgba(100, 255, 100, 0.8)' : 'rgba(255, 255, 255, 0.2)';
-    ctx.lineWidth = hasBooost ? 2 : 1;
+    ctx.strokeStyle = hasBoost ? 'rgba(100, 255, 100, 0.8)' : 'rgba(255, 255, 255, 0.2)';
+    ctx.lineWidth = hasBoost ? 2 : 1;
     ctx.beginPath();
-    ctx.roundRect(x, y, barWidth + 30, barHeight + 20, 9);
+    ctx.roundRect(x, y, barWidth + 20 * scale, barHeight + 16 * scale, 6 * scale);
     ctx.fill();
     ctx.stroke();
 
-    if (hasBooost) {
+    if (hasBoost) {
       // BOOST ACTIVE - show countdown
       const pulse = 0.7 + 0.3 * Math.sin(performance.now() / 100);
       ctx.fillStyle = `rgba(100, 255, 100, ${pulse})`;
-      ctx.font = 'bold 12px monospace';
-      ctx.fillText('BOOST ACTIVE!', x + 10, y + 15);
+      ctx.font = `bold ${Math.floor(10 * scale)}px monospace`;
+      ctx.fillText(this.isMobile ? 'BOOST!' : 'BOOST ACTIVE!', x + 8 * scale, y + 12 * scale);
 
       // Progress bar background
       ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
       ctx.beginPath();
-      ctx.roundRect(x + 10, y + 22, barWidth, 12, 4);
+      ctx.roundRect(x + 8 * scale, y + 18 * scale, barWidth, 10 * scale, 3 * scale);
       ctx.fill();
 
       // Progress bar fill (time remaining)
       const progress = boostTimeRemaining / this.boostDuration;
-      const gradient = ctx.createLinearGradient(x + 10, 0, x + 10 + barWidth, 0);
+      const gradient = ctx.createLinearGradient(x + 8 * scale, 0, x + 8 * scale + barWidth, 0);
       gradient.addColorStop(0, '#22c55e');
       gradient.addColorStop(1, '#86efac');
       ctx.fillStyle = gradient;
       ctx.beginPath();
-      ctx.roundRect(x + 10, y + 22, barWidth * progress, 12, 4);
+      ctx.roundRect(x + 8 * scale, y + 18 * scale, barWidth * progress, 10 * scale, 3 * scale);
       ctx.fill();
 
       // Time text
       ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 10px monospace';
-      ctx.fillText(`${(boostTimeRemaining / 1000).toFixed(1)}s`, x + barWidth - 20, y + 32);
+      ctx.font = `bold ${Math.floor(9 * scale)}px monospace`;
+      ctx.fillText(`${(boostTimeRemaining / 1000).toFixed(1)}s`, x + barWidth - 10 * scale, y + 27 * scale);
     } else {
       // Show kills until next boost
       ctx.fillStyle = '#94a3b8';
-      ctx.font = 'bold 12px monospace';
-      ctx.fillText('NEXT BOOST', x + 10, y + 15);
+      ctx.font = `bold ${Math.floor(10 * scale)}px monospace`;
+      ctx.fillText('NEXT BOOST', x + 8 * scale, y + 12 * scale);
 
       // Kills indicator (3 dots)
-      const dotRadius = 8;
-      const dotSpacing = 30;
-      const startDotX = x + 30;
-      const dotY = y + 32;
+      const dotRadius = Math.floor(6 * scale);
+      const dotSpacing = Math.floor(22 * scale);
+      const startDotX = x + 20 * scale;
+      const dotY = y + 28 * scale;
 
       for (let i = 0; i < 3; i++) {
         const dotX = startDotX + i * dotSpacing;
@@ -1850,60 +1944,63 @@ export class Game {
         }
       }
 
-      // Kills text
-      ctx.fillStyle = '#64748b';
-      ctx.font = '11px monospace';
-      ctx.fillText(`${killsUntilBoost} kill${killsUntilBoost !== 1 ? 's' : ''} to go`, x + 110, y + 36);
+      // Kills text (only show on desktop - too cramped on mobile)
+      if (!this.isMobile) {
+        ctx.fillStyle = '#64748b';
+        ctx.font = '11px monospace';
+        ctx.fillText(`${killsUntilBoost} kill${killsUntilBoost !== 1 ? 's' : ''} to go`, x + 110, y + 36);
+      }
     }
   }
 
   /**
-   * Draw territory control bar at top (scaled 1.5x)
+   * Draw territory control bar at top (responsive)
    */
   private drawTerritoryBar(): void {
     const { ctx } = this;
-    const barWidth = 450; // 300 * 1.5
-    const barHeight = 36; // 24 * 1.5
+    const scale = this.hudScale;
+    const barWidth = this.isMobile ? Math.min(300, this.viewportWidth - 40) : 450;
+    const barHeight = 36 * scale;
     const x = (this.viewportWidth - barWidth) / 2;
-    const y = 20;
+    const y = 10 * scale + 5;
 
     // Background (50% transparent so player visible behind)
     ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.roundRect(x, y, barWidth, barHeight + 30, 9);
+    ctx.roundRect(x, y, barWidth, barHeight + 20 * scale, 9 * scale);
     ctx.fill();
     ctx.stroke();
 
     // Label
     ctx.fillStyle = '#94a3b8';
-    ctx.font = 'bold 15px monospace';
-    ctx.fillText('TERRITORY CONTROL', x + 15, y + 21);
+    ctx.font = `bold ${Math.floor(13 * scale)}px monospace`;
+    ctx.fillText('TERRITORY', x + 10 * scale, y + 16 * scale);
 
     // Progress bar background
     ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
     ctx.beginPath();
-    ctx.roundRect(x + 15, y + 33, barWidth - 30, 15, 5);
+    ctx.roundRect(x + 10 * scale, y + 26 * scale, barWidth - 20 * scale, 12 * scale, 4 * scale);
     ctx.fill();
 
     // Progress bar fill (actual territory percentage)
     const progress = this.territoryMap.getOwnershipPercentage(1) / 100; // Convert to 0-1
     if (progress > 0) {
-      const gradient = ctx.createLinearGradient(x + 15, 0, x + 15 + (barWidth - 30) * progress, 0);
+      const gradient = ctx.createLinearGradient(x + 10 * scale, 0, x + 10 * scale + (barWidth - 20 * scale) * progress, 0);
       gradient.addColorStop(0, '#3b82f6');
       gradient.addColorStop(1, '#60a5fa');
       ctx.fillStyle = gradient;
       ctx.beginPath();
-      ctx.roundRect(x + 15, y + 33, (barWidth - 30) * progress, 15, 5);
+      ctx.roundRect(x + 10 * scale, y + 26 * scale, (barWidth - 20 * scale) * progress, 12 * scale, 4 * scale);
       ctx.fill();
     }
 
     // Percentage text
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 15px monospace';
+    ctx.font = `bold ${Math.floor(13 * scale)}px monospace`;
     ctx.textAlign = 'right';
-    ctx.fillText(`${(progress * 100).toFixed(1)}%`, x + barWidth - 15, y + 21);
+    ctx.fillText(`${(progress * 100).toFixed(1)}%`, x + barWidth - 10 * scale, y + 16 * scale);
     ctx.textAlign = 'left';
   }
 
@@ -1912,6 +2009,13 @@ export class Game {
    */
   private drawBotList(): void {
     const { ctx } = this;
+
+    // On mobile, show compact rank badge instead of full leaderboard
+    if (this.isMobile) {
+      this.drawMobileRankBadge();
+      return;
+    }
+
     const listWidth = 220;
     const x = this.viewportWidth - listWidth - 20;
     const y = 20;
@@ -2045,14 +2149,70 @@ export class Game {
   }
 
   /**
-   * Draw mini-map at bottom center (scaled 1.5x)
+   * Draw compact rank badge for mobile
+   */
+  private drawMobileRankBadge(): void {
+    const { ctx } = this;
+
+    // Build leaderboard to calculate rank
+    const leaderboard: { player: Player; percent: number; isHuman: boolean }[] = [];
+    leaderboard.push({
+      player: this.player,
+      percent: this.territoryMap.getOwnershipPercentage(1),
+      isHuman: true
+    });
+    this.bots.forEach((bot) => {
+      leaderboard.push({
+        player: bot.player,
+        percent: this.territoryMap.getOwnershipPercentage(bot.player.id),
+        isHuman: false
+      });
+    });
+
+    // Sort by alive status then territory
+    leaderboard.sort((a, b) => {
+      if (a.player.alive !== b.player.alive) return a.player.alive ? -1 : 1;
+      return b.percent - a.percent;
+    });
+
+    const humanRank = leaderboard.findIndex(e => e.isHuman) + 1;
+    const aliveCount = leaderboard.filter(e => e.player.alive).length;
+
+    // Draw small badge top-right
+    const badgeW = 70;
+    const badgeH = 50;
+    const x = this.viewportWidth - badgeW - 10;
+    const y = 10;
+
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.beginPath();
+    ctx.roundRect(x, y, badgeW, badgeH, 6);
+    ctx.fill();
+
+    // Rank number
+    ctx.fillStyle = '#60a5fa';
+    ctx.font = 'bold 18px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`#${humanRank}`, x + badgeW / 2, y + 22);
+
+    // Alive count
+    ctx.fillStyle = '#22c55e';
+    ctx.font = '11px monospace';
+    ctx.fillText(`${aliveCount} left`, x + badgeW / 2, y + 40);
+    ctx.textAlign = 'left';
+  }
+
+  /**
+   * Draw mini-map at bottom (responsive - smaller on mobile, bottom-right)
    */
   private drawMiniMap(): void {
     const { ctx } = this;
-    const mapWidth = 225; // 150 * 1.5
-    const mapHeight = 150; // 100 * 1.5
-    const x = (this.viewportWidth - mapWidth) / 2;
-    const y = this.viewportHeight - mapHeight - 20;
+    const scale = this.hudScale;
+    const mapWidth = this.isMobile ? 100 : 225;
+    const mapHeight = this.isMobile ? 70 : 150;
+    // On mobile, position bottom-right; on desktop, bottom-center
+    const x = this.isMobile ? this.viewportWidth - mapWidth - 10 : (this.viewportWidth - mapWidth) / 2;
+    const y = this.viewportHeight - mapHeight - 10;
 
     // Background (50% transparent so player visible behind)
     ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
@@ -2111,5 +2271,8 @@ export class Game {
     window.removeEventListener('keydown', this.boundKeyDown);
     window.removeEventListener('keyup', this.boundKeyUp);
     window.removeEventListener('resize', this.boundResize);
+    this.canvas.removeEventListener('touchstart', this.boundTouchStart);
+    this.canvas.removeEventListener('touchmove', this.boundTouchMove);
+    this.canvas.removeEventListener('touchend', this.boundTouchEnd);
   }
 }
