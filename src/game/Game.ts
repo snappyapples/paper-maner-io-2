@@ -87,10 +87,10 @@ export class Game {
   private readonly boostSpeedMultiplier: number = 1.5; // 50% faster
 
   // Boost pickup items on the map
-  private boostPickups: { x: number; y: number; spawnTime: number }[] = [];
+  private boostPickups: { x: number; y: number; spawnTime: number; playerOnly: boolean }[] = [];
   private readonly boostPickupRadius: number = 15; // collision radius
   private readonly boostPickupSpawnInterval: number = 8000; // spawn new one every 8 seconds
-  private readonly maxBoostPickups: number = 5; // max on map at once
+  private readonly maxBoostPickups: number = 5; // max on map at once (3x in impossible mode)
   private lastBoostPickupSpawn: number = 0;
 
   // How to Play popup state
@@ -687,8 +687,11 @@ export class Game {
   private updateBoostPickups(): void {
     const now = performance.now();
 
+    // In impossible mode, 3x the max pickups
+    const maxPickups = this.difficulty === 'impossible' ? this.maxBoostPickups * 3 : this.maxBoostPickups;
+
     // Spawn new boost pickup periodically
-    if (this.boostPickups.length < this.maxBoostPickups &&
+    if (this.boostPickups.length < maxPickups &&
         now - this.lastBoostPickupSpawn > this.boostPickupSpawnInterval) {
       this.spawnBoostPickup();
       this.lastBoostPickupSpawn = now;
@@ -700,6 +703,10 @@ export class Game {
 
       for (let i = this.boostPickups.length - 1; i >= 0; i--) {
         const pickup = this.boostPickups[i];
+
+        // Player-only pickups can only be collected by human player
+        if (pickup.playerOnly && player.id !== 1) continue;
+
         const dx = player.pos.x - pickup.x;
         const dy = player.pos.y - pickup.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
@@ -723,6 +730,9 @@ export class Game {
     const margin = 100;
     const arenaW = derivedConfig.arenaWidthPx;
     const arenaH = derivedConfig.arenaHeightPx;
+
+    // In impossible mode, 75% of pickups are player-only
+    const playerOnly = this.difficulty === 'impossible' && Math.random() < 0.75;
 
     // Find a random location not too close to existing pickups or players
     let attempts = 0;
@@ -757,7 +767,7 @@ export class Game {
       }
 
       if (!tooClose) {
-        this.boostPickups.push({ x, y, spawnTime: performance.now() });
+        this.boostPickups.push({ x, y, spawnTime: performance.now(), playerOnly });
         return;
       }
 
@@ -767,7 +777,7 @@ export class Game {
     // Fallback - just spawn it anyway
     const x = margin + Math.random() * (arenaW - margin * 2);
     const y = margin + Math.random() * (arenaH - margin * 2);
-    this.boostPickups.push({ x, y, spawnTime: performance.now() });
+    this.boostPickups.push({ x, y, spawnTime: performance.now(), playerOnly });
   }
 
   /**
@@ -1861,24 +1871,35 @@ export class Game {
       const pulse = 1 + Math.sin(age / 200) * 0.15;
       const radius = this.boostPickupRadius * pulse;
 
+      // Colors based on pickup type
+      const isPlayerOnly = pickup.playerOnly;
+
       // Outer glow
       const gradient = ctx.createRadialGradient(screenX, screenY, 0, screenX, screenY, radius * 2);
-      gradient.addColorStop(0, 'rgba(255, 215, 0, 0.6)');
-      gradient.addColorStop(0.5, 'rgba(255, 165, 0, 0.3)');
-      gradient.addColorStop(1, 'rgba(255, 100, 0, 0)');
+      if (isPlayerOnly) {
+        // Cyan/blue for player-only
+        gradient.addColorStop(0, 'rgba(0, 200, 255, 0.6)');
+        gradient.addColorStop(0.5, 'rgba(0, 150, 255, 0.3)');
+        gradient.addColorStop(1, 'rgba(0, 100, 200, 0)');
+      } else {
+        // Yellow/gold for everyone
+        gradient.addColorStop(0, 'rgba(255, 215, 0, 0.6)');
+        gradient.addColorStop(0.5, 'rgba(255, 165, 0, 0.3)');
+        gradient.addColorStop(1, 'rgba(255, 100, 0, 0)');
+      }
       ctx.fillStyle = gradient;
       ctx.beginPath();
       ctx.arc(screenX, screenY, radius * 2, 0, Math.PI * 2);
       ctx.fill();
 
-      // Main circle (lightning bolt yellow)
-      ctx.fillStyle = '#fbbf24';
+      // Main circle
+      ctx.fillStyle = isPlayerOnly ? '#22d3ee' : '#fbbf24';
       ctx.beginPath();
       ctx.arc(screenX, screenY, radius, 0, Math.PI * 2);
       ctx.fill();
 
       // Inner highlight
-      ctx.fillStyle = '#fef3c7';
+      ctx.fillStyle = isPlayerOnly ? '#cffafe' : '#fef3c7';
       ctx.beginPath();
       ctx.arc(screenX - radius * 0.2, screenY - radius * 0.2, radius * 0.4, 0, Math.PI * 2);
       ctx.fill();
@@ -1886,7 +1907,7 @@ export class Game {
       // Lightning bolt icon
       ctx.save();
       ctx.translate(screenX, screenY);
-      ctx.fillStyle = '#7c2d12';
+      ctx.fillStyle = isPlayerOnly ? '#164e63' : '#7c2d12';
       ctx.beginPath();
       ctx.moveTo(-3, -8);
       ctx.lineTo(2, -2);
@@ -1899,7 +1920,7 @@ export class Game {
       ctx.restore();
 
       // Border
-      ctx.strokeStyle = '#d97706';
+      ctx.strokeStyle = isPlayerOnly ? '#0891b2' : '#d97706';
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.arc(screenX, screenY, radius, 0, Math.PI * 2);
