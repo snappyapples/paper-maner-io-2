@@ -823,9 +823,10 @@ export class Game {
    * This prevents small unreachable patches from blocking 100% completion
    */
   private captureOrphanedTiles(): void {
-    // Only check every 180 frames (3 seconds) - this is expensive
+    // Only check periodically - this is expensive (less frequent on mobile)
     this.orphanCheckCounter++;
-    if (this.orphanCheckCounter < 180) return;
+    const checkInterval = this.isMobile ? 360 : 180; // 6 seconds on mobile, 3 on desktop
+    if (this.orphanCheckCounter < checkInterval) return;
     this.orphanCheckCounter = 0;
 
     // Only run if player has significant territory (optimization)
@@ -1454,13 +1455,6 @@ export class Game {
 
     // Reset text alignment
     ctx.textAlign = 'left';
-
-    // Hint text
-    ctx.fillStyle = '#64748b';
-    ctx.font = '14px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('Press SPACE or click to restart', centerX, panelY + panelHeight - 15);
-    ctx.textAlign = 'left';
   }
 
   /**
@@ -1590,6 +1584,9 @@ export class Game {
    * Draw topographic contour lines for tactical feel
    */
   private drawContourLines(): void {
+    // Skip contour lines on mobile for better performance
+    if (this.isMobile) return;
+
     const { ctx } = this;
     const { theme } = gameConfig;
 
@@ -1627,6 +1624,9 @@ export class Game {
    * Draw a subtle grid for visual reference
    */
   private drawGrid(): void {
+    // Skip grid on mobile for better performance
+    if (this.isMobile) return;
+
     const { ctx } = this;
     const { tileSize, theme } = gameConfig;
 
