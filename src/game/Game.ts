@@ -1,0 +1,2115 @@
+import { Player } from './Player';
+import { TerritoryMap } from './TerritoryMap';
+import { Vec2 } from './Vec2';
+import { BotAI } from './BotAI';
+import { gameConfig, derivedConfig } from './gameConfig';
+
+/**
+ * Main Game class - handles game loop, rendering, and input
+ * Player ALWAYS moves forward; mouse/arrow keys steer direction
+ */
+export class Game {
+  private canvas: HTMLCanvasElement;
+  private ctx: CanvasRenderingContext2D;
+  private player: Player;
+  private territoryMap: TerritoryMap;
+
+  // Bots
+  private bots: BotAI[] = [];
+  private allPlayers: Player[] = [];
+
+  // Track territory state per player (was in own territory last frame)
+  private wasInOwnTerritory: Map<number, boolean> = new Map();
+
+  // Async capture queue - process captures without blocking movement
+  private captureQueue: { player: Player; tail: Vec2[] }[] = [];
+  private isProcessingCapture: boolean = false;
+  private maxCaptureTimePerFrame: number = 4; // ms budget per frame for captures
+
+  // Viewport dimensions (updated on resize)
+  private viewportWidth: number = 0;
+  private viewportHeight: number = 0;
+
+  // Camera position (top-left corner of viewport in world coords)
+  private cameraX: number = 0;
+  private cameraY: number = 0;
+
+  // Mouse position in WORLD coordinates
+  private mouseWorldX: number = 0;
+  private mouseWorldY: number = 0;
+
+  // Input state
+  private keys: Set<string> = new Set();
+  private useMouseSteering: boolean = true; // Toggle between mouse and keyboard
+
+  // Game loop
+  private lastTime: number = 0;
+  private accumulator: number = 0;
+  private running: boolean = false;
+  private animationFrameId: number | null = null;
+
+  // Bound handlers for cleanup
+  private boundKeyDown: (e: KeyboardEvent) => void;
+  private boundKeyUp: (e: KeyboardEvent) => void;
+  private boundResize: () => void;
+
+  // Camping mechanic state (per player)
+  private campingTimers: Map<number, number> = new Map(); // playerId -> camping time
+  private shrinkAccumulators: Map<number, number> = new Map(); // playerId -> shrink accumulator
+
+  // Game state
+  private gameOver: boolean = false;
+  private isVictory: boolean = false;
+  private gameStartTime: number = 0;
+  private gameEndTime: number = 0;
+  private maxTerritoryPercent: number = 0; // Track highest territory for defeat screen
+
+  // Win condition threshold (99.5% to avoid tiny unreachable pockets)
+  private readonly winThreshold: number = 99.5;
+
+  // Power-up state (every 3rd kill) - per player
+  private boostEndTimes: Map<number, number> = new Map(); // playerId -> boost end time
+  private readonly boostDuration: number = 3000; // 3 seconds
+  private readonly boostSpeedMultiplier: number = 1.5; // 50% faster
+
+  constructor(canvas: HTMLCanvasElement) {
+    this.canvas = canvas;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      throw new Error('Failed to get 2D context');
+    }
+    this.ctx = ctx;
+
+    // Set canvas to fill the window
+    this.resizeCanvas();
+
+    // Create territory map
+    this.territoryMap = new TerritoryMap();
+
+    // Create player at center of arena
+    this.player = new Player({
+      id: 1,
+      isBot: false,
+      startX: derivedConfig.arenaWidthPx / 2,
+      startY: derivedConfig.arenaHeightPx / 2,
+      color: gameConfig.player.color,
+    });
+
+    // Generate starting territory for player
+    this.territoryMap.generateStartingTerritory(
+      this.player.pos.x,
+      this.player.pos.y,
+      1, // Player ID
+      12 // Starting radius in tiles
+    );
+
+    // Initialize territory tracking for human player
+    this.wasInOwnTerritory.set(1, true);
+    this.allPlayers.push(this.player);
+
+    // Create bots - use count from config (19 for full game)
+    this.createBots(gameConfig.bot.count);
+
+    // Give bots awareness of all players
+    this.updateBotPlayerReferences();
+
+    // Initialize camera centered on player
+    this.updateCamera(1); // Snap immediately
+
+    // Bind handlers
+    this.boundKeyDown = this.handleKeyDown.bind(this);
+    this.boundKeyUp = this.handleKeyUp.bind(this);
+    this.boundResize = this.resizeCanvas.bind(this);
+
+    this.setupInputHandlers();
+  }
+
+  /**
+   * Create bot players with random placement for unpredictable spawns
+   * Some may cluster near you, others may be far away
+   */
+  private createBots(count: number): void {
+    const botColors = [
+      '#22c55e', // green
+      '#f59e0b', // orange
+      '#ec4899', // pink
+      '#8b5cf6', // purple
+      '#14b8a6', // teal
+      '#f43f5e', // rose
+      '#06b6d4', // cyan
+      '#84cc16', // lime
+      '#eab308', // yellow
+      '#ef4444', // red
+      '#a855f7', // violet
+      '#0ea5e9', // sky blue
+      '#10b981', // emerald
+      '#f97316', // orange-bright
+      '#d946ef', // fuchsia
+      '#6366f1', // indigo
+      '#fb7185', // pink-light
+      '#2dd4bf', // teal-light
+      '#a3e635', // lime-bright
+    ];
+
+    const arenaW = derivedConfig.arenaWidthPx;
+    const arenaH = derivedConfig.arenaHeightPx;
+    const margin = 120;
+
+    // Human player position (center)
+    const humanX = arenaW / 2;
+    const humanY = arenaH / 2;
+
+    // Minimum distance between any two spawn points (prevents overlap)
+    const minSpacing = 80;
+
+    // Track all spawn positions
+    const spawnPositions: { x: number; y: number }[] = [{ x: humanX, y: humanY }];
+
+    for (let i = 0; i < count; i++) {
+      const botId = i + 2;
+
+      // Try to find a valid random position
+      let startX: number = 0;
+      let startY: number = 0;
+      let validPosition = false;
+      let attempts = 0;
+      const maxAttempts = 50;
+
+      while (!validPosition && attempts < maxAttempts) {
+        // Fully random position within arena bounds
+        startX = margin + Math.random() * (arenaW - margin * 2);
+        startY = margin + Math.random() * (arenaH - margin * 2);
+
+        // Check minimum spacing from all existing spawns
+        validPosition = true;
+        for (const pos of spawnPositions) {
+          const dist = Math.sqrt(Math.pow(startX - pos.x, 2) + Math.pow(startY - pos.y, 2));
+          if (dist < minSpacing) {
+            validPosition = false;
+            break;
+          }
+        }
+        attempts++;
+      }
+
+      // If couldn't find valid position, just use the last attempted position
+      spawnPositions.push({ x: startX, y: startY });
+
+      const botPlayer = new Player({
+        id: botId,
+        isBot: true,
+        startX,
+        startY,
+        color: botColors[i % botColors.length],
+      });
+
+      // Generate starting territory for bot (slightly smaller than player)
+      this.territoryMap.generateStartingTerritory(startX, startY, botId, 8);
+
+      // Create bot AI
+      const botAI = new BotAI(botPlayer, this.territoryMap);
+      this.bots.push(botAI);
+      this.allPlayers.push(botPlayer);
+      this.wasInOwnTerritory.set(botId, true);
+    }
+  }
+
+  /**
+   * Update bot references to all players (for AI awareness)
+   */
+  private updateBotPlayerReferences(): void {
+    for (const bot of this.bots) {
+      bot.setAllPlayers(this.allPlayers);
+    }
+  }
+
+  /**
+   * Resize canvas to fill the window
+   */
+  private resizeCanvas(): void {
+    this.canvas.width = window.innerWidth;
+    this.canvas.height = window.innerHeight;
+    this.viewportWidth = window.innerWidth;
+    this.viewportHeight = window.innerHeight;
+  }
+
+  /**
+   * Handle keydown events
+   */
+  private handleKeyDown(e: KeyboardEvent): void {
+    this.keys.add(e.key);
+
+    // Handle game over restart
+    if (this.gameOver && (e.key === ' ' || e.key === 'Enter')) {
+      this.restartGame();
+      return;
+    }
+
+    // Switch to keyboard steering when arrow keys pressed
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'w', 'a', 's', 'd'].includes(e.key)) {
+      this.useMouseSteering = false;
+    }
+
+    // Prevent arrow keys from scrolling the page
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+      e.preventDefault();
+    }
+  }
+
+  /**
+   * Handle keyup events
+   */
+  private handleKeyUp(e: KeyboardEvent): void {
+    this.keys.delete(e.key);
+  }
+
+  /**
+   * Set up mouse and keyboard event handlers
+   */
+  private setupInputHandlers(): void {
+    // Mouse move - convert screen coords to world coords
+    this.canvas.addEventListener('mousemove', (e) => {
+      // Screen position is directly the mouse position (canvas fills window)
+      const screenX = e.clientX;
+      const screenY = e.clientY;
+
+      // Convert to world position
+      this.mouseWorldX = screenX + this.cameraX;
+      this.mouseWorldY = screenY + this.cameraY;
+
+      // Switch to mouse steering when mouse moves
+      this.useMouseSteering = true;
+    });
+
+    // Click handler for game over restart
+    this.canvas.addEventListener('click', () => {
+      if (this.gameOver) {
+        this.restartGame();
+      }
+    });
+
+    // Keyboard events
+    window.addEventListener('keydown', this.boundKeyDown);
+    window.addEventListener('keyup', this.boundKeyUp);
+
+    // Window resize
+    window.addEventListener('resize', this.boundResize);
+  }
+
+  /**
+   * Start the game loop
+   */
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    this.lastTime = performance.now();
+    this.gameStartTime = performance.now();
+    this.gameLoop(this.lastTime);
+  }
+
+  /**
+   * Stop the game loop
+   */
+  stop(): void {
+    this.running = false;
+    if (this.animationFrameId !== null) {
+      cancelAnimationFrame(this.animationFrameId);
+      this.animationFrameId = null;
+    }
+  }
+
+  /**
+   * Restart the game with a fresh state
+   */
+  restartGame(): void {
+    // Reset game state
+    this.gameOver = false;
+    this.isVictory = false;
+    this.gameStartTime = performance.now();
+    this.gameEndTime = 0;
+
+    // Reset camping state for all players
+    this.campingTimers.clear();
+    this.shrinkAccumulators.clear();
+
+    // Clear territory map completely
+    this.territoryMap = new TerritoryMap();
+
+    // Reset human player
+    this.player.pos.set(derivedConfig.arenaWidthPx / 2, derivedConfig.arenaHeightPx / 2);
+    this.player.alive = true;
+    this.player.tail = [];
+    this.player.isDrawingTail = false;
+    this.player.lastTailPoint = null;
+    this.player.kills = 0;
+    this.player.angle = 0;
+    this.player.targetAngle = 0;
+    this.player.dir.set(1, 0);
+
+    // Generate player territory
+    this.territoryMap.generateStartingTerritory(
+      this.player.pos.x, this.player.pos.y, 1, 12
+    );
+    this.wasInOwnTerritory.set(1, true);
+
+    // Reset and regenerate all bots
+    this.bots = [];
+    this.allPlayers = [this.player];
+    this.createBots(gameConfig.bot.count);
+
+    // Give bots awareness of all players
+    this.updateBotPlayerReferences();
+
+    // Clear effects
+    this.killEffects = [];
+    this.captureQueue = [];
+
+    // Reset boost state
+    this.boostEndTimes.clear();
+    this.boostNotifications = [];
+    this.maxTerritoryPercent = 0;
+
+    // Reset camera
+    this.updateCamera(1);
+
+    console.log('Game restarted!');
+  }
+
+  /**
+   * Main game loop using fixed timestep
+   */
+  private gameLoop = (currentTime: number): void => {
+    if (!this.running) return;
+
+    const deltaTime = (currentTime - this.lastTime) / 1000;
+    this.lastTime = currentTime;
+
+    const cappedDelta = Math.min(deltaTime, 0.1);
+    this.accumulator += cappedDelta;
+
+    const fixedDt = gameConfig.loop.fixedDeltaTime;
+
+    while (this.accumulator >= fixedDt) {
+      this.update(fixedDt);
+      this.accumulator -= fixedDt;
+    }
+
+    this.render();
+
+    this.animationFrameId = requestAnimationFrame(this.gameLoop);
+  };
+
+  /**
+   * Process input and determine target direction
+   */
+  private processInput(dt: number): void {
+    if (this.useMouseSteering) {
+      // Steer toward mouse position
+      this.player.setTargetDirectionToward(this.mouseWorldX, this.mouseWorldY);
+    } else {
+      // Steer with arrow keys / WASD - smooth turning at controlled rate
+      const turnSpeed = gameConfig.player.keyboardTurnSpeed; // radians per second
+      const turnAmount = turnSpeed * dt;
+
+      if (this.keys.has('ArrowLeft') || this.keys.has('a') || this.keys.has('A')) {
+        // Turn left (counter-clockwise)
+        this.player.adjustTargetAngle(-turnAmount);
+      }
+      if (this.keys.has('ArrowRight') || this.keys.has('d') || this.keys.has('D')) {
+        // Turn right (clockwise)
+        this.player.adjustTargetAngle(turnAmount);
+      }
+      // Up/Down could be used for speed boost later, or ignored for now
+    }
+  }
+
+  /**
+   * Update camera to follow player
+   */
+  private updateCamera(lerpFactor?: number): void {
+    const lerp = lerpFactor ?? gameConfig.camera.lerpSpeed;
+    const arenaWidth = derivedConfig.arenaWidthPx;
+    const arenaHeight = derivedConfig.arenaHeightPx;
+
+    // Target camera position (centered on player)
+    let targetX = this.player.pos.x - this.viewportWidth / 2;
+    let targetY = this.player.pos.y - this.viewportHeight / 2;
+
+    // If arena fits in viewport, center it instead of following player
+    if (arenaWidth <= this.viewportWidth) {
+      targetX = -(this.viewportWidth - arenaWidth) / 2;
+    } else {
+      // Clamp to arena bounds
+      targetX = Math.max(0, Math.min(arenaWidth - this.viewportWidth, targetX));
+    }
+
+    if (arenaHeight <= this.viewportHeight) {
+      targetY = -(this.viewportHeight - arenaHeight) / 2;
+    } else {
+      // Clamp to arena bounds
+      targetY = Math.max(0, Math.min(arenaHeight - this.viewportHeight, targetY));
+    }
+
+    // Smoothly interpolate camera
+    this.cameraX += (targetX - this.cameraX) * lerp;
+    this.cameraY += (targetY - this.cameraY) * lerp;
+  }
+
+  /**
+   * Update game state (called at fixed timestep)
+   */
+  private update(dt: number): void {
+    // Track max territory for defeat screen
+    const currentTerritory = this.territoryMap.getOwnershipPercentage(1);
+    if (currentTerritory > this.maxTerritoryPercent) {
+      this.maxTerritoryPercent = currentTerritory;
+    }
+
+    // Update boost state
+    this.updateBoost();
+
+    // Update human player FIRST (highest priority - never skip)
+    this.processInput(dt);
+
+    // Apply speed boost if active (human)
+    const originalHumanSpeed = this.player.speed;
+    if (this.isPlayerBoosted(1)) {
+      this.player.speed = gameConfig.player.speed * this.boostSpeedMultiplier;
+    }
+
+    this.player.update(dt);
+
+    // Restore original speed after update
+    this.player.speed = originalHumanSpeed;
+
+    // Update all bots
+    for (const bot of this.bots) {
+      if (bot.player.alive) {
+        bot.update(dt);
+
+        // Apply speed boost if bot has it
+        const originalBotSpeed = bot.player.speed;
+        if (this.isPlayerBoosted(bot.player.id)) {
+          bot.player.speed = gameConfig.bot.baseSpeed * this.boostSpeedMultiplier;
+        }
+
+        bot.player.update(dt);
+
+        // Restore original speed
+        bot.player.speed = originalBotSpeed;
+      }
+    }
+
+    // Check wall collisions for all players
+    this.checkWallCollisions();
+
+    // Handle tail mechanics for all players
+    for (const player of this.allPlayers) {
+      if (player.alive) {
+        this.updateTailMechanicsForPlayer(player);
+      }
+    }
+
+    // Check for collisions between players and other players' tails
+    this.checkAllTailCollisions();
+
+    // Process queued captures with time budget (async-style)
+    this.processQueuedCaptures();
+
+    // Auto-capture orphaned neutral tiles surrounded by player territory
+    this.captureOrphanedTiles();
+
+    // Update camping timer and territory shrink for human player
+    this.updateCampingMechanic(dt);
+
+    // Check win/loss conditions
+    this.checkGameEndConditions();
+
+    this.updateCamera();
+  }
+
+  /**
+   * Update boost power-up state for all players
+   */
+  private updateBoost(): void {
+    const now = performance.now();
+    for (const [playerId, endTime] of this.boostEndTimes) {
+      if (now > endTime) {
+        this.boostEndTimes.delete(playerId);
+        if (playerId === 1) {
+          console.log('Your boost ended!');
+        }
+      }
+    }
+  }
+
+  /**
+   * Check if a player has boost active
+   */
+  private isPlayerBoosted(playerId: number): boolean {
+    const endTime = this.boostEndTimes.get(playerId);
+    return endTime !== undefined && performance.now() < endTime;
+  }
+
+  /**
+   * Get remaining boost time for a player (in ms)
+   */
+  private getBoostTimeRemaining(playerId: number): number {
+    const endTime = this.boostEndTimes.get(playerId);
+    if (!endTime) return 0;
+    return Math.max(0, endTime - performance.now());
+  }
+
+  /**
+   * Activate the boost power-up for a player (called on every 3rd kill)
+   */
+  private activateBoost(playerId: number): void {
+    this.boostEndTimes.set(playerId, performance.now() + this.boostDuration);
+    // Add visual notification
+    this.boostNotifications.push({ playerId, time: performance.now() });
+    if (playerId === 1) {
+      console.log('BOOST ACTIVATED! 3 seconds of speed + immunity!');
+    } else {
+      console.log(`Bot ${playerId} activated boost!`);
+    }
+  }
+
+  /**
+   * Check if the game has ended (victory or defeat)
+   */
+  private checkGameEndConditions(): void {
+    if (this.gameOver) return;
+
+    // Check for defeat - human player died
+    if (!this.player.alive) {
+      this.gameOver = true;
+      this.isVictory = false;
+      this.gameEndTime = performance.now();
+      console.log('GAME OVER - You were eliminated!');
+      return;
+    }
+
+    // Check for victory - ALL enemies must be eliminated AND own significant territory
+    const aliveBots = this.bots.filter(b => b.player.alive).length;
+    const playerPercent = this.territoryMap.getOwnershipPercentage(1);
+
+    if (aliveBots === 0) {
+      // All enemies eliminated - victory!
+      this.gameOver = true;
+      this.isVictory = true;
+      this.gameEndTime = performance.now();
+      console.log(`VICTORY! All enemies eliminated! Territory: ${playerPercent.toFixed(1)}%`);
+    }
+  }
+
+  /**
+   * Track camping time and shrink territory if player stays inside too long
+   * Applies to all players, timer gradually decreases when outside territory
+   */
+  private updateCampingMechanic(dt: number): void {
+    for (const player of this.allPlayers) {
+      if (!player.alive) {
+        this.campingTimers.set(player.id, 0);
+        this.shrinkAccumulators.set(player.id, 0);
+        continue;
+      }
+
+      const playerId = player.id;
+      let campingTime = this.campingTimers.get(playerId) || 0;
+      let shrinkAccum = this.shrinkAccumulators.get(playerId) || 0;
+
+      // Check if player is inside their own territory with no tail
+      const currentTile = this.territoryMap.worldToTile(player.pos.x, player.pos.y);
+      const isInOwnTerritory = this.territoryMap.getOwner(currentTile.x, currentTile.y) === playerId;
+      const hasTail = player.tail.length > 0;
+
+      if (isInOwnTerritory && !hasTail) {
+        // Player is camping - increment timer
+        campingTime += dt;
+
+        // Start shrinking after threshold
+        if (campingTime > gameConfig.shrink.campingThreshold) {
+          shrinkAccum += dt;
+
+          // Calculate tiles to remove this frame
+          const tilesToRemove = Math.floor(shrinkAccum * gameConfig.shrink.rate);
+          if (tilesToRemove > 0) {
+            shrinkAccum -= tilesToRemove / gameConfig.shrink.rate;
+            this.shrinkTerritory(playerId, tilesToRemove);
+          }
+        }
+      } else {
+        // Player left territory or is drawing tail - gradually decrease timer
+        // Decrease at the same rate it increases
+        campingTime = Math.max(0, campingTime - dt);
+
+        // Reset shrink accumulator when not camping
+        if (campingTime <= gameConfig.shrink.campingThreshold) {
+          shrinkAccum = 0;
+        }
+      }
+
+      this.campingTimers.set(playerId, campingTime);
+      this.shrinkAccumulators.set(playerId, shrinkAccum);
+    }
+  }
+
+  /**
+   * Check if a player is currently shrinking (for HUD display)
+   */
+  private isPlayerShrinking(playerId: number): boolean {
+    const campingTime = this.campingTimers.get(playerId) || 0;
+    return campingTime > gameConfig.shrink.campingThreshold;
+  }
+
+  /**
+   * Get camping time for a player (for HUD display)
+   */
+  private getPlayerCampingTime(playerId: number): number {
+    return this.campingTimers.get(playerId) || 0;
+  }
+
+  /**
+   * Remove border tiles from a player's territory
+   */
+  private shrinkTerritory(playerId: number, tilesToRemove: number): void {
+    const borderTiles = this.territoryMap.getBorderTiles(playerId);
+    if (borderTiles.length === 0) return;
+
+    // Find the player to avoid removing tile under them
+    const player = this.allPlayers.find(p => p.id === playerId);
+    let playerTile = { x: -1, y: -1 };
+    if (player) {
+      playerTile = this.territoryMap.worldToTile(player.pos.x, player.pos.y);
+    }
+
+    // Shuffle border tiles for random shrinking
+    for (let i = borderTiles.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [borderTiles[i], borderTiles[j]] = [borderTiles[j], borderTiles[i]];
+    }
+
+    // Remove tiles (but not the one under the player)
+    let removed = 0;
+    for (const tile of borderTiles) {
+      if (removed >= tilesToRemove) break;
+      if (tile.x === playerTile.x && tile.y === playerTile.y) continue;
+      this.territoryMap.setOwner(tile.x, tile.y, 0);
+      removed++;
+    }
+  }
+
+  /**
+   * Queue a territory capture for async processing
+   */
+  private queueCapture(player: Player): void {
+    // Clone the tail since it will be cleared
+    const tailCopy = player.tail.map(p => p.clone());
+    this.captureQueue.push({ player, tail: tailCopy });
+  }
+
+  /**
+   * Process queued captures with a time budget to avoid frame drops
+   */
+  private processQueuedCaptures(): void {
+    if (this.captureQueue.length === 0) return;
+
+    const startTime = performance.now();
+
+    // Process captures until time budget exhausted or queue empty
+    while (this.captureQueue.length > 0) {
+      const elapsed = performance.now() - startTime;
+      if (elapsed > this.maxCaptureTimePerFrame) {
+        // Time budget exhausted, continue next frame
+        break;
+      }
+
+      const capture = this.captureQueue.shift()!;
+      this.captureTerritoryFromTail(capture.player, capture.tail);
+    }
+  }
+
+  // Counter to throttle orphaned tile check (expensive operation)
+  private orphanCheckCounter: number = 0;
+
+  /**
+   * Capture any neutral tiles that are completely surrounded by player territory
+   * This prevents small unreachable patches from blocking 100% completion
+   */
+  private captureOrphanedTiles(): void {
+    // Only check every 180 frames (3 seconds) - this is expensive
+    this.orphanCheckCounter++;
+    if (this.orphanCheckCounter < 180) return;
+    this.orphanCheckCounter = 0;
+
+    // Only run if player has significant territory (optimization)
+    const playerPercent = this.territoryMap.getOwnershipPercentage(1);
+    if (playerPercent < 10) return; // Don't bother if player has little territory
+
+    const playerOwnerId = 1;
+    const width = this.territoryMap.widthTiles;
+    const height = this.territoryMap.heightTiles;
+
+    // Helper to check if a tile is player-owned or out of bounds (edges count as "owned" for enclosure)
+    const isPlayerOrEdge = (x: number, y: number): boolean => {
+      if (x < 0 || x >= width || y < 0 || y >= height) return true; // Edge counts as enclosed
+      return this.territoryMap.getOwner(x, y) === playerOwnerId;
+    };
+
+    // Find neutral tiles that are completely surrounded by player territory or arena edge
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (this.territoryMap.getOwner(x, y) === 0) {
+          // Check all 4 neighbors (edges count as "player" for enclosure purposes)
+          if (isPlayerOrEdge(x, y - 1) && isPlayerOrEdge(x, y + 1) &&
+              isPlayerOrEdge(x - 1, y) && isPlayerOrEdge(x + 1, y)) {
+            this.territoryMap.setOwner(x, y, playerOwnerId);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Handle tail drawing and capture logic for a specific player
+   */
+  private updateTailMechanicsForPlayer(player: Player): void {
+    const playerId = player.id;
+    const currentTile = this.territoryMap.worldToTile(player.pos.x, player.pos.y);
+    const isInOwnTerritory = this.territoryMap.getOwner(currentTile.x, currentTile.y) === playerId;
+    const wasInOwn = this.wasInOwnTerritory.get(playerId) ?? true;
+
+    if (isInOwnTerritory) {
+      // Player is in their own territory
+      if (!wasInOwn && player.tail.length > 0) {
+        // Just re-entered own territory with a tail - queue capture (async)
+        this.queueCapture(player);
+      }
+      // Clear the tail and stop drawing
+      player.tail = [];
+      player.isDrawingTail = false;
+      player.lastTailPoint = null;
+    } else {
+      // Player is outside their territory
+      if (!player.isDrawingTail) {
+        // Just left territory - start drawing tail
+        player.isDrawingTail = true;
+        // Add the exit point as first tail point
+        player.tail = [player.pos.clone()];
+        player.lastTailPoint = player.pos.clone();
+      } else {
+        // Continue drawing tail - add point if far enough from last point
+        const lastPoint = player.lastTailPoint!;
+        const dist = Math.sqrt(
+          Math.pow(player.pos.x - lastPoint.x, 2) +
+          Math.pow(player.pos.y - lastPoint.y, 2)
+        );
+
+        if (dist >= player.tailPointDistance) {
+          player.tail.push(player.pos.clone());
+          player.lastTailPoint = player.pos.clone();
+
+          // Check for self-collision
+          if (this.checkSelfTailCollisionForPlayer(player)) {
+            this.handlePlayerDeath(player);
+          }
+        }
+      }
+    }
+
+    this.wasInOwnTerritory.set(playerId, isInOwnTerritory);
+  }
+
+  /**
+   * Check if a player collides with their own tail
+   */
+  private checkSelfTailCollisionForPlayer(player: Player): boolean {
+    if (player.tail.length < 10) return false; // Need enough tail to collide with
+
+    const playerRadius = gameConfig.player.radius;
+    const collisionDist = playerRadius * 0.8;
+
+    // Check against all tail points except the last few (too close to player)
+    for (let i = 0; i < player.tail.length - 5; i++) {
+      const tailPoint = player.tail[i];
+      const dist = Math.sqrt(
+        Math.pow(player.pos.x - tailPoint.x, 2) +
+        Math.pow(player.pos.y - tailPoint.y, 2)
+      );
+
+      if (dist < collisionDist) {
+        return true;
+      }
+    }
+
+    // Also check line segments for more accurate collision
+    for (let i = 0; i < player.tail.length - 6; i++) {
+      const p1 = player.tail[i];
+      const p2 = player.tail[i + 1];
+
+      if (this.pointToLineDistance(player.pos, p1, p2) < collisionDist) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Check all players against other players' tails
+   */
+  private checkAllTailCollisions(): void {
+    const playerRadius = gameConfig.player.radius;
+    const collisionDist = playerRadius * 0.8;
+
+    for (const attacker of this.allPlayers) {
+      if (!attacker.alive) continue;
+
+      for (const victim of this.allPlayers) {
+        if (!victim.alive || attacker.id === victim.id) continue;
+        if (victim.tail.length < 3) continue;
+
+        // IMMUNITY: Skip attacks on any player's tail when they have boost active
+        if (this.isPlayerBoosted(victim.id)) {
+          continue;
+        }
+
+        // Check if attacker collides with victim's tail
+        for (let i = 0; i < victim.tail.length - 2; i++) {
+          const tailPoint = victim.tail[i];
+          const dist = Math.sqrt(
+            Math.pow(attacker.pos.x - tailPoint.x, 2) +
+            Math.pow(attacker.pos.y - tailPoint.y, 2)
+          );
+
+          if (dist < collisionDist) {
+            // Attacker hit victim's tail - victim dies, attacker gets their territory!
+            this.handlePlayerDeath(victim, attacker);
+            attacker.kills++;
+
+            // Activate boost on every 3rd kill (for any player)
+            if (attacker.kills % 3 === 0) {
+              this.activateBoost(attacker.id);
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Check if any player has hit the arena walls
+   */
+  private checkWallCollisions(): void {
+    const arenaW = derivedConfig.arenaWidthPx;
+    const arenaH = derivedConfig.arenaHeightPx;
+    const margin = 2; // Small margin for wall detection
+
+    for (const player of this.allPlayers) {
+      if (!player.alive) continue;
+
+      if (player.pos.x < margin || player.pos.x > arenaW - margin ||
+          player.pos.y < margin || player.pos.y > arenaH - margin) {
+        // Player hit wall - death with no killer (no territory transfer)
+        this.handlePlayerDeath(player);
+      }
+    }
+  }
+
+  /**
+   * Calculate distance from point to line segment
+   */
+  private pointToLineDistance(point: Vec2, lineStart: Vec2, lineEnd: Vec2): number {
+    const dx = lineEnd.x - lineStart.x;
+    const dy = lineEnd.y - lineStart.y;
+    const lenSq = dx * dx + dy * dy;
+
+    if (lenSq === 0) {
+      // Line segment is a point
+      return Math.sqrt(
+        Math.pow(point.x - lineStart.x, 2) +
+        Math.pow(point.y - lineStart.y, 2)
+      );
+    }
+
+    // Project point onto line, clamped to segment
+    let t = ((point.x - lineStart.x) * dx + (point.y - lineStart.y) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+
+    const projX = lineStart.x + t * dx;
+    const projY = lineStart.y + t * dy;
+
+    return Math.sqrt(
+      Math.pow(point.x - projX, 2) +
+      Math.pow(point.y - projY, 2)
+    );
+  }
+
+  /**
+   * Capture territory enclosed by the tail using flood fill
+   * Uses a "smaller side" heuristic - captures the smaller of the two regions created by the tail
+   */
+  private captureTerritoryFromTail(player: Player, tail: Vec2[]): void {
+    if (tail.length < 3) return;
+
+    const playerOwnerId = player.id;
+    const mapWidth = this.territoryMap.widthTiles;
+    const mapHeight = this.territoryMap.heightTiles;
+
+    // Convert tail to tile coordinates
+    const tailTiles: { x: number; y: number }[] = [];
+    for (const point of tail) {
+      const tile = this.territoryMap.worldToTile(point.x, point.y);
+      tailTiles.push(tile);
+    }
+    // Add current position as the closing point
+    const endTile = this.territoryMap.worldToTile(player.pos.x, player.pos.y);
+    tailTiles.push(endTile);
+
+    // Find bounding box that includes ALL player territory + tail
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+
+    // First pass: find tail bounds
+    for (const tile of tailTiles) {
+      minX = Math.min(minX, tile.x);
+      maxX = Math.max(maxX, tile.x);
+      minY = Math.min(minY, tile.y);
+      maxY = Math.max(maxY, tile.y);
+    }
+
+    // Expand to include all player territory (important for large captures)
+    for (let y = 0; y < mapHeight; y++) {
+      for (let x = 0; x < mapWidth; x++) {
+        if (this.territoryMap.getOwner(x, y) === playerOwnerId) {
+          minX = Math.min(minX, x);
+          maxX = Math.max(maxX, x);
+          minY = Math.min(minY, y);
+          maxY = Math.max(maxY, y);
+        }
+      }
+    }
+
+    // Add padding for flood fill boundary
+    const padding = 2;
+    minX = Math.max(0, minX - padding);
+    maxX = Math.min(mapWidth - 1, maxX + padding);
+    minY = Math.max(0, minY - padding);
+    maxY = Math.min(mapHeight - 1, maxY + padding);
+
+    const boxWidth = maxX - minX + 1;
+    const boxHeight = maxY - minY + 1;
+
+    // Create temporary grid: 0 = unknown, 1 = barrier (tail/territory), 2 = outside
+    const tempGrid = new Uint8Array(boxWidth * boxHeight);
+
+    // Mark existing player territory as barrier
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        if (this.territoryMap.getOwner(x, y) === playerOwnerId) {
+          tempGrid[(y - minY) * boxWidth + (x - minX)] = 1;
+        }
+      }
+    }
+
+    // Mark tail path as barrier (thick line to ensure no gaps)
+    for (let i = 0; i < tailTiles.length - 1; i++) {
+      this.markThickLine(tempGrid, boxWidth, boxHeight, minX, minY,
+        tailTiles[i].x, tailTiles[i].y, tailTiles[i + 1].x, tailTiles[i + 1].y);
+    }
+
+    // Also mark each tail point with a small radius
+    for (const tile of tailTiles) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const tx = tile.x + dx - minX;
+          const ty = tile.y + dy - minY;
+          if (tx >= 0 && tx < boxWidth && ty >= 0 && ty < boxHeight) {
+            tempGrid[ty * boxWidth + tx] = 1;
+          }
+        }
+      }
+    }
+
+    // Flood fill from edges to mark "outside" regions
+    const queue: number[] = [];
+
+    // Seed from all edges of the bounding box
+    for (let x = 0; x < boxWidth; x++) {
+      if (tempGrid[x] === 0) { tempGrid[x] = 2; queue.push(x); }
+      const bottomIdx = (boxHeight - 1) * boxWidth + x;
+      if (tempGrid[bottomIdx] === 0) { tempGrid[bottomIdx] = 2; queue.push(bottomIdx); }
+    }
+    for (let y = 0; y < boxHeight; y++) {
+      const leftIdx = y * boxWidth;
+      if (tempGrid[leftIdx] === 0) { tempGrid[leftIdx] = 2; queue.push(leftIdx); }
+      const rightIdx = y * boxWidth + boxWidth - 1;
+      if (tempGrid[rightIdx] === 0) { tempGrid[rightIdx] = 2; queue.push(rightIdx); }
+    }
+
+    // BFS flood fill
+    let queueStart = 0;
+    while (queueStart < queue.length) {
+      const idx = queue[queueStart++];
+      const x = idx % boxWidth;
+      const y = Math.floor(idx / boxWidth);
+
+      // Check 4 neighbors
+      if (x > 0 && tempGrid[idx - 1] === 0) { tempGrid[idx - 1] = 2; queue.push(idx - 1); }
+      if (x < boxWidth - 1 && tempGrid[idx + 1] === 0) { tempGrid[idx + 1] = 2; queue.push(idx + 1); }
+      if (y > 0 && tempGrid[idx - boxWidth] === 0) { tempGrid[idx - boxWidth] = 2; queue.push(idx - boxWidth); }
+      if (y < boxHeight - 1 && tempGrid[idx + boxWidth] === 0) { tempGrid[idx + boxWidth] = 2; queue.push(idx + boxWidth); }
+    }
+
+    // Capture all tiles that are still 0 (inside the loop) or are tail tiles (1 but not already owned)
+    for (let by = 0; by < boxHeight; by++) {
+      for (let bx = 0; bx < boxWidth; bx++) {
+        const idx = by * boxWidth + bx;
+        const mapX = bx + minX;
+        const mapY = by + minY;
+
+        // Capture if: inside (0) OR tail barrier that isn't already ours
+        if (tempGrid[idx] === 0 ||
+            (tempGrid[idx] === 1 && this.territoryMap.getOwner(mapX, mapY) !== playerOwnerId)) {
+          this.territoryMap.setOwner(mapX, mapY, playerOwnerId);
+        }
+      }
+    }
+  }
+
+  /**
+   * Mark a thick line on the grid using Bresenham's algorithm with thickness
+   */
+  private markThickLine(grid: Uint8Array, width: number, height: number,
+    offsetX: number, offsetY: number, x0: number, y0: number, x1: number, y1: number): void {
+    // Convert to local coordinates
+    x0 -= offsetX; y0 -= offsetY;
+    x1 -= offsetX; y1 -= offsetY;
+
+    const dx = Math.abs(x1 - x0);
+    const dy = Math.abs(y1 - y0);
+    const sx = x0 < x1 ? 1 : -1;
+    const sy = y0 < y1 ? 1 : -1;
+    let err = dx - dy;
+
+    while (true) {
+      // Mark this tile and immediate neighbors (thickness of 3)
+      for (let oy = -1; oy <= 1; oy++) {
+        for (let ox = -1; ox <= 1; ox++) {
+          const tx = x0 + ox;
+          const ty = y0 + oy;
+          if (tx >= 0 && tx < width && ty >= 0 && ty < height) {
+            grid[ty * width + tx] = 1;
+          }
+        }
+      }
+
+      if (x0 === x1 && y0 === y1) break;
+      const e2 = 2 * err;
+      if (e2 > -dy) { err -= dy; x0 += sx; }
+      if (e2 < dx) { err += dx; y0 += sy; }
+    }
+  }
+
+  /**
+   * Handle any player death (human or bot)
+   * @param player - The player who died
+   * @param killer - The player who killed them (optional, for territory transfer)
+   */
+  private handlePlayerDeath(player: Player, killer?: Player): void {
+    // Mark as dead immediately
+    player.alive = false;
+    player.tail = [];
+    player.isDrawingTail = false;
+    player.lastTailPoint = null;
+
+    const isHuman = player.id === 1;
+
+    if (killer) {
+      // Killed by another player - transfer territory and stay DEAD permanently
+      this.territoryMap.transferTerritory(player.id, killer.id);
+      console.log(`Player ${killer.id} killed Player ${player.id} and took their territory!`);
+
+      // Add kill feedback effect
+      this.addKillEffect(player.pos.x, player.pos.y);
+      // No respawn - permanent death when killed by another player
+      // (game over check happens in checkGameEndConditions for human)
+    } else {
+      // Self-death (tail collision) or wall collision
+      if (isHuman) {
+        // Human self-death - game over, no respawn
+        this.territoryMap.clearOwnerTerritory(player.id);
+        console.log('Human player died (self/wall collision) - Game Over!');
+        // Player stays dead, game over will be detected in checkGameEndConditions
+      } else {
+        // Bot self-death - respawn with fresh territory
+        this.territoryMap.clearOwnerTerritory(player.id);
+        console.log(`Bot ${player.id} died (self/wall collision) - respawning`);
+        this.respawnPlayerEntity(player);
+      }
+    }
+  }
+
+  // Kill effect tracking for visual feedback
+  private killEffects: { x: number; y: number; time: number }[] = [];
+
+  // Boost notification tracking
+  private boostNotifications: { playerId: number; time: number }[] = [];
+
+  /**
+   * Add a visual kill effect at the specified position
+   */
+  private addKillEffect(x: number, y: number): void {
+    this.killEffects.push({ x, y, time: performance.now() });
+  }
+
+  /**
+   * Respawn a player with a fresh start - clear all territory and create new blob
+   */
+  private respawnPlayerEntity(player: Player): void {
+    const playerId = player.id;
+
+    // Clear all player territory
+    this.territoryMap.clearOwnerTerritory(playerId);
+
+    // Find a safe spawn location
+    const arenaW = derivedConfig.arenaWidthPx;
+    const arenaH = derivedConfig.arenaHeightPx;
+    const margin = 200;
+
+    let spawnX: number, spawnY: number;
+    if (player.id === 1) {
+      // Human player spawns at center
+      spawnX = arenaW / 2;
+      spawnY = arenaH / 2;
+    } else {
+      // Bots spawn at random locations
+      spawnX = margin + Math.random() * (arenaW - margin * 2);
+      spawnY = margin + Math.random() * (arenaH - margin * 2);
+    }
+
+    player.pos.set(spawnX, spawnY);
+
+    // Generate fresh starting territory
+    const startRadius = player.id === 1 ? 12 : 10;
+    this.territoryMap.generateStartingTerritory(player.pos.x, player.pos.y, playerId, startRadius);
+
+    // Clear tail and reset state
+    player.tail = [];
+    player.isDrawingTail = false;
+    player.lastTailPoint = null;
+    this.wasInOwnTerritory.set(playerId, true);
+
+    // Reset player direction
+    player.angle = Math.random() * Math.PI * 2;
+    player.targetAngle = player.angle;
+    player.dir.set(Math.cos(player.angle), Math.sin(player.angle));
+    player.alive = true;
+  }
+
+  /**
+   * Render the game
+   */
+  private render(): void {
+    const { ctx } = this;
+    const { theme } = gameConfig;
+
+    // Clear canvas with fog of war color (outside arena)
+    ctx.fillStyle = theme.fog;
+    ctx.fillRect(0, 0, this.viewportWidth, this.viewportHeight);
+
+    // Draw the arena background
+    this.drawArenaBackground();
+
+    // Draw topographic contour lines
+    this.drawContourLines();
+
+    // Draw territory
+    this.territoryMap.render(ctx, this.cameraX, this.cameraY, this.viewportWidth, this.viewportHeight);
+
+    // Draw grid (relative to camera)
+    this.drawGrid();
+
+    // Draw arena border (if visible)
+    this.drawArenaBorder();
+
+    // Draw all player tails
+    for (const player of this.allPlayers) {
+      if (player.alive) {
+        this.drawTailForPlayer(player);
+      }
+    }
+
+    // Draw all players
+    for (const player of this.allPlayers) {
+      if (player.alive) {
+        player.render(ctx, this.cameraX, this.cameraY);
+      }
+    }
+
+    // Draw kill effects
+    this.drawKillEffects();
+
+    // Draw boost notifications
+    this.drawBoostNotifications();
+
+    // Draw HUD
+    this.drawHUD();
+
+    // Draw game over overlay if game has ended
+    if (this.gameOver) {
+      this.drawGameOverOverlay();
+    }
+  }
+
+  /**
+   * Draw the victory or defeat overlay
+   */
+  private drawGameOverOverlay(): void {
+    const { ctx } = this;
+    const centerX = this.viewportWidth / 2;
+    const centerY = this.viewportHeight / 2;
+
+    // Semi-transparent backdrop with blur effect
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.fillRect(0, 0, this.viewportWidth, this.viewportHeight);
+
+    // Calculate game stats
+    // For defeats, show max territory achieved (since current is 0 after death)
+    const territoryPercent = this.isVictory
+      ? this.territoryMap.getOwnershipPercentage(1)
+      : this.maxTerritoryPercent;
+    const gameTimeMs = this.gameEndTime - this.gameStartTime;
+    const minutes = Math.floor(gameTimeMs / 60000);
+    const seconds = Math.floor((gameTimeMs % 60000) / 1000);
+    const timeStr = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    const killCount = this.player.kills;
+    const botsEliminated = this.bots.filter(b => !b.player.alive).length;
+
+    // Panel dimensions
+    const panelWidth = 400;
+    const panelHeight = 380;
+    const panelX = centerX - panelWidth / 2;
+    const panelY = centerY - panelHeight / 2;
+
+    // Panel background
+    ctx.fillStyle = 'rgba(30, 41, 59, 0.95)';
+    ctx.strokeStyle = this.isVictory ? '#22c55e' : '#ef4444';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.roundRect(panelX, panelY, panelWidth, panelHeight, 12);
+    ctx.fill();
+    ctx.stroke();
+
+    // Title
+    ctx.fillStyle = this.isVictory ? '#22c55e' : '#ef4444';
+    ctx.font = 'bold 48px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(this.isVictory ? 'VICTORY' : 'DEFEATED', centerX, panelY + 60);
+
+    // Subtitle
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '18px monospace';
+    ctx.fillText(
+      this.isVictory ? 'The map is yours.' : 'Your campaign has ended.',
+      centerX, panelY + 90
+    );
+
+    // Stats section
+    const statsY = panelY + 130;
+    const rowHeight = 50;
+
+    // Stats background rows
+    const stats = [
+      { label: 'Territory Conquered', value: `${territoryPercent.toFixed(1)}%` },
+      { label: 'Enemies Eliminated', value: `${botsEliminated}` },
+      { label: 'Your Kills', value: `${killCount}` },
+      { label: 'Mission Time', value: timeStr }
+    ];
+
+    stats.forEach((stat, i) => {
+      const rowY = statsY + i * rowHeight;
+
+      // Row background
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+      ctx.beginPath();
+      ctx.roundRect(panelX + 20, rowY, panelWidth - 40, 40, 6);
+      ctx.fill();
+
+      // Label
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '16px monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(stat.label, panelX + 35, rowY + 26);
+
+      // Value
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 16px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(stat.value, panelX + panelWidth - 35, rowY + 26);
+    });
+
+    // Restart button
+    const btnY = panelY + panelHeight - 60;
+    const btnWidth = 200;
+    const btnHeight = 45;
+    const btnX = centerX - btnWidth / 2;
+
+    ctx.fillStyle = this.isVictory ? '#22c55e' : '#ef4444';
+    ctx.beginPath();
+    ctx.roundRect(btnX, btnY, btnWidth, btnHeight, 8);
+    ctx.fill();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 18px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(this.isVictory ? 'New Campaign' : 'Try Again', centerX, btnY + 30);
+
+    // Reset text alignment
+    ctx.textAlign = 'left';
+
+    // Hint text
+    ctx.fillStyle = '#64748b';
+    ctx.font = '14px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('Press SPACE or click to restart', centerX, panelY + panelHeight - 15);
+    ctx.textAlign = 'left';
+  }
+
+  /**
+   * Draw visual feedback for recent kills
+   */
+  private drawKillEffects(): void {
+    const { ctx } = this;
+    const now = performance.now();
+    const effectDuration = 600; // ms
+
+    // Filter out expired effects and draw active ones
+    this.killEffects = this.killEffects.filter(effect => {
+      const age = now - effect.time;
+      if (age > effectDuration) return false;
+
+      // Convert to screen coords
+      const screenX = effect.x - this.cameraX;
+      const screenY = effect.y - this.cameraY;
+
+      // Skip if off-screen
+      if (screenX < -50 || screenX > this.viewportWidth + 50 ||
+          screenY < -50 || screenY > this.viewportHeight + 50) {
+        return true; // Keep effect but don't draw
+      }
+
+      // Expanding ring effect
+      const progress = age / effectDuration;
+      const radius = 20 + progress * 80;
+      const opacity = 1 - progress;
+
+      ctx.save();
+      ctx.strokeStyle = `rgba(255, 100, 100, ${opacity})`;
+      ctx.lineWidth = 4 * (1 - progress * 0.5);
+      ctx.beginPath();
+      ctx.arc(screenX, screenY, radius, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Inner flash
+      if (progress < 0.3) {
+        const flashOpacity = (0.3 - progress) / 0.3;
+        ctx.fillStyle = `rgba(255, 255, 255, ${flashOpacity * 0.5})`;
+        ctx.beginPath();
+        ctx.arc(screenX, screenY, 30 * (1 - progress), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+
+      return true; // Keep effect
+    });
+  }
+
+  /**
+   * Draw "BOOST!" popup notifications when players activate boost
+   */
+  private drawBoostNotifications(): void {
+    const { ctx } = this;
+    const now = performance.now();
+    const notificationDuration = 1200; // ms
+
+    this.boostNotifications = this.boostNotifications.filter(notification => {
+      const age = now - notification.time;
+      if (age > notificationDuration) return false;
+
+      // Only show notification for human player prominently
+      if (notification.playerId !== 1) return true; // Keep but don't draw for bots
+
+      const progress = age / notificationDuration;
+
+      // Animation: scale up then fade out
+      const scale = progress < 0.2
+        ? 0.5 + (progress / 0.2) * 0.5  // Scale up from 0.5 to 1.0
+        : 1.0;
+      const opacity = progress < 0.3
+        ? 1.0
+        : 1.0 - ((progress - 0.3) / 0.7); // Fade out after 30%
+
+      // Position: center of screen, moving up slightly
+      const centerX = this.viewportWidth / 2;
+      const centerY = this.viewportHeight / 2 - 50 - (progress * 30);
+
+      ctx.save();
+      ctx.translate(centerX, centerY);
+      ctx.scale(scale, scale);
+
+      // Glowing text effect
+      const pulse = 0.8 + 0.2 * Math.sin(now / 50);
+
+      // Outer glow
+      ctx.shadowColor = '#00ff88';
+      ctx.shadowBlur = 30 * pulse;
+      ctx.fillStyle = `rgba(0, 255, 136, ${opacity})`;
+      ctx.font = 'bold 72px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('BOOST!', 0, 0);
+
+      // Inner bright text
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = `rgba(255, 255, 255, ${opacity})`;
+      ctx.fillText('BOOST!', 0, 0);
+
+      ctx.restore();
+
+      return true; // Keep notification
+    });
+  }
+
+  /**
+   * Draw the arena background (tactical map style)
+   */
+  private drawArenaBackground(): void {
+    const { ctx } = this;
+    const { theme } = gameConfig;
+    const arenaW = derivedConfig.arenaWidthPx;
+    const arenaH = derivedConfig.arenaHeightPx;
+
+    // Convert arena bounds to screen coords
+    const left = -this.cameraX;
+    const top = -this.cameraY;
+
+    // Draw arena as a slightly lighter area than fog
+    ctx.fillStyle = theme.mapBg;
+    ctx.fillRect(left, top, arenaW, arenaH);
+  }
+
+  /**
+   * Draw topographic contour lines for tactical feel
+   */
+  private drawContourLines(): void {
+    const { ctx } = this;
+    const { theme } = gameConfig;
+
+    // Draw concentric circles emanating from center of arena
+    const arenaCenterX = derivedConfig.arenaWidthPx / 2 - this.cameraX;
+    const arenaCenterY = derivedConfig.arenaHeightPx / 2 - this.cameraY;
+
+    ctx.strokeStyle = theme.contourColor;
+    ctx.lineWidth = 1;
+
+    const maxRadius = Math.max(derivedConfig.arenaWidthPx, derivedConfig.arenaHeightPx);
+    const contourSpacing = 120; // Increased spacing = fewer circles = better performance
+
+    // Only draw circles that are visible in viewport (with some margin)
+    const margin = 200;
+    const minVisibleRadius = Math.max(0,
+      Math.sqrt(Math.pow(Math.max(0, -arenaCenterX - margin), 2) + Math.pow(Math.max(0, -arenaCenterY - margin), 2))
+    );
+    const maxVisibleRadius = Math.sqrt(
+      Math.pow(Math.max(Math.abs(arenaCenterX), Math.abs(this.viewportWidth - arenaCenterX)) + margin, 2) +
+      Math.pow(Math.max(Math.abs(arenaCenterY), Math.abs(this.viewportHeight - arenaCenterY)) + margin, 2)
+    );
+
+    // Batch all arcs in single path
+    ctx.beginPath();
+    const startR = Math.ceil(minVisibleRadius / contourSpacing) * contourSpacing;
+    for (let r = Math.max(contourSpacing, startR); r < Math.min(maxRadius, maxVisibleRadius); r += contourSpacing) {
+      ctx.moveTo(arenaCenterX + r, arenaCenterY);
+      ctx.arc(arenaCenterX, arenaCenterY, r, 0, Math.PI * 2);
+    }
+    ctx.stroke();
+  }
+
+  /**
+   * Draw a subtle grid for visual reference
+   */
+  private drawGrid(): void {
+    const { ctx } = this;
+    const { tileSize, theme } = gameConfig;
+
+    ctx.strokeStyle = theme.gridColor;
+    ctx.lineWidth = 0.5;
+
+    const gridStep = tileSize * 10;
+
+    // Calculate grid offset based on camera
+    const offsetX = -(this.cameraX % gridStep);
+    const offsetY = -(this.cameraY % gridStep);
+
+    // Only draw grid within arena bounds
+    const arenaLeft = -this.cameraX;
+    const arenaTop = -this.cameraY;
+    const arenaRight = derivedConfig.arenaWidthPx - this.cameraX;
+    const arenaBottom = derivedConfig.arenaHeightPx - this.cameraY;
+
+    ctx.beginPath();
+    for (let x = offsetX; x < this.viewportWidth; x += gridStep) {
+      if (x >= arenaLeft && x <= arenaRight) {
+        ctx.moveTo(x, Math.max(0, arenaTop));
+        ctx.lineTo(x, Math.min(this.viewportHeight, arenaBottom));
+      }
+    }
+    for (let y = offsetY; y < this.viewportHeight; y += gridStep) {
+      if (y >= arenaTop && y <= arenaBottom) {
+        ctx.moveTo(Math.max(0, arenaLeft), y);
+        ctx.lineTo(Math.min(this.viewportWidth, arenaRight), y);
+      }
+    }
+    ctx.stroke();
+  }
+
+  /**
+   * Draw arena border (danger zone indicator)
+   */
+  private drawArenaBorder(): void {
+    const { ctx } = this;
+    const { theme } = gameConfig;
+    const arenaW = derivedConfig.arenaWidthPx;
+    const arenaH = derivedConfig.arenaHeightPx;
+
+    // Convert arena bounds to screen coords
+    const left = -this.cameraX;
+    const top = -this.cameraY;
+
+    // Draw a glowing danger border
+    ctx.strokeStyle = theme.borderColor;
+    ctx.lineWidth = 3;
+    ctx.shadowColor = theme.borderColor;
+    ctx.shadowBlur = 10;
+
+    ctx.beginPath();
+    ctx.rect(left, top, arenaW, arenaH);
+    ctx.stroke();
+
+    // Reset shadow
+    ctx.shadowBlur = 0;
+  }
+
+  /**
+   * Draw a player's tail
+   */
+  private drawTailForPlayer(player: Player): void {
+    if (player.tail.length < 2) return;
+
+    const { ctx } = this;
+    const isBoosted = this.isPlayerBoosted(player.id);
+
+    ctx.save();
+
+    // Enhanced glow when boosted
+    if (isBoosted) {
+      // Pulsing outer glow for boosted players
+      const pulse = 0.6 + 0.4 * Math.sin(performance.now() / 80);
+      ctx.shadowColor = '#00ff88';
+      ctx.shadowBlur = 30 * pulse;
+
+      // Draw outer glow pass
+      ctx.strokeStyle = `rgba(0, 255, 136, ${0.3 * pulse})`;
+      ctx.lineWidth = 20;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      ctx.beginPath();
+      const firstPointGlow = player.tail[0];
+      ctx.moveTo(firstPointGlow.x - this.cameraX, firstPointGlow.y - this.cameraY);
+      for (let i = 1; i < player.tail.length; i++) {
+        const point = player.tail[i];
+        ctx.lineTo(point.x - this.cameraX, point.y - this.cameraY);
+      }
+      ctx.lineTo(player.pos.x - this.cameraX, player.pos.y - this.cameraY);
+      ctx.stroke();
+    }
+
+    // Draw tail line with glow effect
+    ctx.strokeStyle = isBoosted ? '#00ff88' : player.color;
+    ctx.lineWidth = isBoosted ? 12 : 10;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.shadowColor = isBoosted ? '#00ff88' : player.color;
+    ctx.shadowBlur = isBoosted ? 20 : 12;
+
+    ctx.beginPath();
+    const firstPoint = player.tail[0];
+    ctx.moveTo(firstPoint.x - this.cameraX, firstPoint.y - this.cameraY);
+
+    for (let i = 1; i < player.tail.length; i++) {
+      const point = player.tail[i];
+      ctx.lineTo(point.x - this.cameraX, point.y - this.cameraY);
+    }
+
+    // Connect to current player position
+    ctx.lineTo(player.pos.x - this.cameraX, player.pos.y - this.cameraY);
+
+    ctx.stroke();
+
+    // Draw a lighter inner line for depth
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = isBoosted ? 'rgba(255, 255, 255, 0.7)' : 'rgba(255, 255, 255, 0.4)';
+    ctx.lineWidth = isBoosted ? 5 : 4;
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  /**
+   * Draw HUD elements (tactical style) - scaled 1.5x
+   */
+  private drawHUD(): void {
+    const { ctx } = this;
+
+    // Top bar - Territory control
+    this.drawTerritoryBar();
+
+    // Right side - Bot/enemy list
+    this.drawBotList();
+
+    // Bottom - Mini-map placeholder
+    this.drawMiniMap();
+
+    // Camping warning indicator (left side, above control mode)
+    this.drawCampingIndicator();
+
+    // Boost indicator (left side, above camping indicator)
+    this.drawBoostIndicator();
+
+    // Control mode indicator (bottom-left)
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(15, this.viewportHeight - 50, 225, 36, 9);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '18px monospace';
+    ctx.fillText(`[${this.useMouseSteering ? 'MOUSE' : 'KEYBOARD'}]`, 24, this.viewportHeight - 24);
+  }
+
+  /**
+   * Draw camping warning indicator when player is inside their territory
+   */
+  private drawCampingIndicator(): void {
+    const campingTime = this.getPlayerCampingTime(1); // Human player
+    const isShrinking = this.isPlayerShrinking(1);
+
+    // Only show if player has any camping time
+    if (campingTime <= 0) return;
+
+    const { ctx } = this;
+    const threshold = gameConfig.shrink.campingThreshold;
+    const progress = Math.min(campingTime / threshold, 1);
+
+    const x = 15;
+    const y = this.viewportHeight - 100;
+    const barWidth = 180;
+    const barHeight = 24;
+
+    // Background
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.strokeStyle = isShrinking ? 'rgba(255, 100, 100, 0.8)' : 'rgba(255, 255, 255, 0.2)';
+    ctx.lineWidth = isShrinking ? 2 : 1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, barWidth + 30, barHeight + 20, 9);
+    ctx.fill();
+    ctx.stroke();
+
+    // Label
+    ctx.fillStyle = isShrinking ? '#ff6b6b' : '#94a3b8';
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText(isShrinking ? 'SHRINKING!' : 'CAMPING', x + 10, y + 15);
+
+    // Progress bar background
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.beginPath();
+    ctx.roundRect(x + 10, y + 22, barWidth, 12, 4);
+    ctx.fill();
+
+    // Progress bar fill - color changes from green to yellow to red
+    let barColor: string;
+    if (progress < 0.5) {
+      barColor = '#22c55e'; // green
+    } else if (progress < 0.8) {
+      barColor = '#f59e0b'; // yellow
+    } else {
+      barColor = '#ef4444'; // red
+    }
+
+    if (isShrinking) {
+      // Pulsing red when shrinking
+      const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 150);
+      barColor = `rgba(239, 68, 68, ${0.7 + 0.3 * pulse})`;
+    }
+
+    ctx.fillStyle = barColor;
+    ctx.beginPath();
+    ctx.roundRect(x + 10, y + 22, barWidth * progress, 12, 4);
+    ctx.fill();
+  }
+
+  /**
+   * Draw boost indicator when player has boost active or shows kills until next boost
+   */
+  private drawBoostIndicator(): void {
+    const { ctx } = this;
+    const hasBooost = this.isPlayerBoosted(1);
+    const killsUntilBoost = 3 - (this.player.kills % 3);
+    const boostTimeRemaining = this.getBoostTimeRemaining(1);
+
+    // Position above camping indicator
+    const x = 15;
+    const y = this.viewportHeight - 160;
+    const barWidth = 180;
+    const barHeight = 24;
+
+    // Background
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.strokeStyle = hasBooost ? 'rgba(100, 255, 100, 0.8)' : 'rgba(255, 255, 255, 0.2)';
+    ctx.lineWidth = hasBooost ? 2 : 1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, barWidth + 30, barHeight + 20, 9);
+    ctx.fill();
+    ctx.stroke();
+
+    if (hasBooost) {
+      // BOOST ACTIVE - show countdown
+      const pulse = 0.7 + 0.3 * Math.sin(performance.now() / 100);
+      ctx.fillStyle = `rgba(100, 255, 100, ${pulse})`;
+      ctx.font = 'bold 12px monospace';
+      ctx.fillText('BOOST ACTIVE!', x + 10, y + 15);
+
+      // Progress bar background
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+      ctx.beginPath();
+      ctx.roundRect(x + 10, y + 22, barWidth, 12, 4);
+      ctx.fill();
+
+      // Progress bar fill (time remaining)
+      const progress = boostTimeRemaining / this.boostDuration;
+      const gradient = ctx.createLinearGradient(x + 10, 0, x + 10 + barWidth, 0);
+      gradient.addColorStop(0, '#22c55e');
+      gradient.addColorStop(1, '#86efac');
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.roundRect(x + 10, y + 22, barWidth * progress, 12, 4);
+      ctx.fill();
+
+      // Time text
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 10px monospace';
+      ctx.fillText(`${(boostTimeRemaining / 1000).toFixed(1)}s`, x + barWidth - 20, y + 32);
+    } else {
+      // Show kills until next boost
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = 'bold 12px monospace';
+      ctx.fillText('NEXT BOOST', x + 10, y + 15);
+
+      // Kills indicator (3 dots)
+      const dotRadius = 8;
+      const dotSpacing = 30;
+      const startDotX = x + 30;
+      const dotY = y + 32;
+
+      for (let i = 0; i < 3; i++) {
+        const dotX = startDotX + i * dotSpacing;
+        const isFilled = i < (this.player.kills % 3);
+
+        ctx.beginPath();
+        ctx.arc(dotX, dotY, dotRadius, 0, Math.PI * 2);
+
+        if (isFilled) {
+          // Filled dot (kill earned)
+          const gradient = ctx.createRadialGradient(dotX, dotY, 0, dotX, dotY, dotRadius);
+          gradient.addColorStop(0, '#86efac');
+          gradient.addColorStop(1, '#22c55e');
+          ctx.fillStyle = gradient;
+          ctx.fill();
+        } else {
+          // Empty dot
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+      }
+
+      // Kills text
+      ctx.fillStyle = '#64748b';
+      ctx.font = '11px monospace';
+      ctx.fillText(`${killsUntilBoost} kill${killsUntilBoost !== 1 ? 's' : ''} to go`, x + 110, y + 36);
+    }
+  }
+
+  /**
+   * Draw territory control bar at top (scaled 1.5x)
+   */
+  private drawTerritoryBar(): void {
+    const { ctx } = this;
+    const barWidth = 450; // 300 * 1.5
+    const barHeight = 36; // 24 * 1.5
+    const x = (this.viewportWidth - barWidth) / 2;
+    const y = 20;
+
+    // Background (50% transparent so player visible behind)
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, barWidth, barHeight + 30, 9);
+    ctx.fill();
+    ctx.stroke();
+
+    // Label
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = 'bold 15px monospace';
+    ctx.fillText('TERRITORY CONTROL', x + 15, y + 21);
+
+    // Progress bar background
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.beginPath();
+    ctx.roundRect(x + 15, y + 33, barWidth - 30, 15, 5);
+    ctx.fill();
+
+    // Progress bar fill (actual territory percentage)
+    const progress = this.territoryMap.getOwnershipPercentage(1) / 100; // Convert to 0-1
+    if (progress > 0) {
+      const gradient = ctx.createLinearGradient(x + 15, 0, x + 15 + (barWidth - 30) * progress, 0);
+      gradient.addColorStop(0, '#3b82f6');
+      gradient.addColorStop(1, '#60a5fa');
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.roundRect(x + 15, y + 33, (barWidth - 30) * progress, 15, 5);
+      ctx.fill();
+    }
+
+    // Percentage text
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 15px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${(progress * 100).toFixed(1)}%`, x + barWidth - 15, y + 21);
+    ctx.textAlign = 'left';
+  }
+
+  /**
+   * Draw leaderboard showing all players sorted by territory percentage
+   */
+  private drawBotList(): void {
+    const { ctx } = this;
+    const listWidth = 220;
+    const x = this.viewportWidth - listWidth - 20;
+    const y = 20;
+
+    // Build leaderboard entries for all players (human + bots)
+    const leaderboard: { player: Player; name: string; percent: number; isHuman: boolean }[] = [];
+
+    // Add human player
+    leaderboard.push({
+      player: this.player,
+      name: 'YOU',
+      percent: this.territoryMap.getOwnershipPercentage(1),
+      isHuman: true
+    });
+
+    // Add all bots
+    const botNames = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot', 'Golf', 'Hotel',
+                      'India', 'Juliet', 'Kilo', 'Lima', 'Mike', 'Nov', 'Oscar', 'Papa',
+                      'Quebec', 'Romeo', 'Sierra'];
+
+    this.bots.forEach((bot, idx) => {
+      leaderboard.push({
+        player: bot.player,
+        name: botNames[idx] || `Bot${idx + 1}`,
+        percent: this.territoryMap.getOwnershipPercentage(bot.player.id),
+        isHuman: false
+      });
+    });
+
+    // Sort by territory percentage (descending), alive players first
+    leaderboard.sort((a, b) => {
+      if (a.player.alive !== b.player.alive) {
+        return a.player.alive ? -1 : 1; // Alive first
+      }
+      return b.percent - a.percent; // Higher percent first
+    });
+
+    // Find human's rank
+    const humanRank = leaderboard.findIndex(e => e.isHuman) + 1;
+
+    // Count alive/dead
+    const aliveCount = leaderboard.filter(e => e.player.alive).length;
+    const deadCount = leaderboard.length - aliveCount;
+
+    // Show top 6 entries
+    const maxVisible = 6;
+    const visibleEntries = leaderboard.slice(0, maxVisible);
+
+    const listHeight = 70 + visibleEntries.length * 32;
+
+    // Background
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, listWidth, listHeight, 9);
+    ctx.fill();
+    ctx.stroke();
+
+    // Header
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText('LEADERBOARD', x + 15, y + 24);
+
+    // Alive count
+    ctx.font = '12px monospace';
+    ctx.fillStyle = '#22c55e';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${aliveCount} alive`, x + listWidth - 15, y + 24);
+    ctx.textAlign = 'left';
+
+    // Your rank line
+    ctx.fillStyle = '#60a5fa';
+    ctx.font = '12px monospace';
+    ctx.fillText(`Your rank: #${humanRank}`, x + 15, y + 42);
+    ctx.fillStyle = '#64748b';
+    ctx.fillText(` / ${leaderboard.length}`, x + 100, y + 42);
+
+    // Draw leaderboard entries
+    visibleEntries.forEach((entry, i) => {
+      const entryY = y + 62 + i * 32;
+      const isAlive = entry.player.alive;
+      const rank = i + 1;
+
+      // Highlight background for human
+      if (entry.isHuman) {
+        ctx.fillStyle = 'rgba(59, 130, 246, 0.2)';
+        ctx.beginPath();
+        ctx.roundRect(x + 5, entryY - 12, listWidth - 10, 28, 4);
+        ctx.fill();
+      }
+
+      // Rank number
+      ctx.fillStyle = isAlive ? '#94a3b8' : '#4b5563';
+      ctx.font = 'bold 12px monospace';
+      ctx.fillText(`${rank}.`, x + 12, entryY + 5);
+
+      // Player icon
+      ctx.beginPath();
+      ctx.arc(x + 40, entryY, 8, 0, Math.PI * 2);
+      ctx.fillStyle = isAlive ? entry.player.color : '#4b5563';
+      ctx.fill();
+      if (entry.isHuman) {
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      // Player name
+      ctx.fillStyle = entry.isHuman ? '#60a5fa' : (isAlive ? '#e2e8f0' : '#6b7280');
+      ctx.font = entry.isHuman ? 'bold 13px monospace' : '13px monospace';
+      ctx.fillText(entry.name, x + 55, entryY + 5);
+
+      // Territory percentage
+      ctx.fillStyle = isAlive ? '#ffffff' : '#6b7280';
+      ctx.font = 'bold 12px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(`${entry.percent.toFixed(1)}%`, x + listWidth - 15, entryY + 5);
+      ctx.textAlign = 'left';
+
+      // Strike-through for dead players
+      if (!isAlive) {
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x + 55, entryY);
+        ctx.lineTo(x + 55 + ctx.measureText(entry.name).width, entryY);
+        ctx.stroke();
+      }
+    });
+  }
+
+  /**
+   * Draw mini-map at bottom center (scaled 1.5x)
+   */
+  private drawMiniMap(): void {
+    const { ctx } = this;
+    const mapWidth = 225; // 150 * 1.5
+    const mapHeight = 150; // 100 * 1.5
+    const x = (this.viewportWidth - mapWidth) / 2;
+    const y = this.viewportHeight - mapHeight - 20;
+
+    // Background (50% transparent so player visible behind)
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, mapWidth, mapHeight, 9);
+    ctx.fill();
+    ctx.stroke();
+
+    // Mini arena background (semi-transparent)
+    const padding = 12;
+    const innerWidth = mapWidth - padding * 2;
+    const innerHeight = mapHeight - padding * 2;
+    ctx.fillStyle = 'rgba(52, 73, 94, 0.6)'; // mapBg color with transparency
+    ctx.fillRect(x + padding, y + padding, innerWidth, innerHeight);
+
+    // Draw all player positions on mini-map
+    for (const player of this.allPlayers) {
+      if (!player.alive) continue;
+
+      const mapX = x + padding + (player.pos.x / derivedConfig.arenaWidthPx) * innerWidth;
+      const mapY = y + padding + (player.pos.y / derivedConfig.arenaHeightPx) * innerHeight;
+
+      // Draw player dot
+      ctx.beginPath();
+      ctx.arc(mapX, mapY, player.id === 1 ? 5 : 3, 0, Math.PI * 2);
+      ctx.fillStyle = player.color;
+      ctx.fill();
+
+      // Only add border for human player
+      if (player.id === 1) {
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
+
+    // Draw viewport rectangle
+    const viewRectX = x + padding + (this.cameraX / derivedConfig.arenaWidthPx) * innerWidth;
+    const viewRectY = y + padding + (this.cameraY / derivedConfig.arenaHeightPx) * innerHeight;
+    const viewRectW = (this.viewportWidth / derivedConfig.arenaWidthPx) * innerWidth;
+    const viewRectH = (this.viewportHeight / derivedConfig.arenaHeightPx) * innerHeight;
+
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(viewRectX, viewRectY, viewRectW, viewRectH);
+  }
+
+  /**
+   * Clean up resources
+   */
+  destroy(): void {
+    this.stop();
+    // Remove event listeners
+    window.removeEventListener('keydown', this.boundKeyDown);
+    window.removeEventListener('keyup', this.boundKeyUp);
+    window.removeEventListener('resize', this.boundResize);
+  }
+}
