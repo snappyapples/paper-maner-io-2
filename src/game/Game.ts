@@ -1633,9 +1633,9 @@ export class Game {
     ctx.fillText('Easy', easyX + btnWidth / 2, btnY + 26);
     this.difficultyButtons.push({ x: easyX, y: btnY, w: btnWidth, h: btnHeight, difficulty: 'easy' });
 
-    // Hard button (orange)
+    // Hard button (red)
     const hardX = btnStartX + btnWidth + btnSpacing;
-    ctx.fillStyle = '#f59e0b';
+    ctx.fillStyle = '#ef4444';
     ctx.beginPath();
     ctx.roundRect(hardX, btnY, btnWidth, btnHeight, 8);
     ctx.fill();
@@ -1696,7 +1696,7 @@ export class Game {
 
     // Popup dimensions
     const popupWidth = 500;
-    const popupHeight = 480;
+    const popupHeight = 520;
     const popupX = centerX - popupWidth / 2;
     const popupY = centerY - popupHeight / 2;
 
@@ -1816,7 +1816,7 @@ export class Game {
     ctx.fillText('Slower bots, lower aggression', popupX + 85, y);
     y += lineHeight;
 
-    ctx.fillStyle = '#f59e0b';
+    ctx.fillStyle = '#ef4444';
     ctx.font = 'bold 14px monospace';
     ctx.fillText('Hard:', popupX + 25, y);
     ctx.fillStyle = '#e2e8f0';
