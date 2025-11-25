@@ -1143,8 +1143,12 @@ export class Game {
             this.handlePlayerDeath(victim, attacker);
             attacker.kills++;
 
-            // Activate boost on every 3rd kill (for any player)
-            if (attacker.kills % 3 === 0) {
+            // Activate boost on kills
+            // Impossible mode: human gets boost on EVERY kill
+            // Normal modes: boost on every 3rd kill (for any player)
+            if (this.difficulty === 'impossible' && attacker.id === 1) {
+              this.activateBoost(attacker.id);
+            } else if (attacker.kills % 3 === 0) {
               this.activateBoost(attacker.id);
             }
             break;
