@@ -4,7 +4,7 @@ import { Vec2 } from './Vec2';
 import { derivedConfig, gameConfig } from './gameConfig';
 
 type BotState = 'expand' | 'harass' | 'retreat' | 'flee' | 'wander';
-export type Difficulty = 'easy' | 'medium' | 'hard';
+export type Difficulty = 'easy' | 'hard' | 'impossible';
 
 /**
  * BotAI - Controls a bot player with intelligent autonomous behavior
@@ -62,20 +62,20 @@ export class BotAI {
       this.expansionDistance = 80 + Math.random() * 100; // 80-180
       this.humanFocus = 0.3; // Occasional human targeting
       this.decisionInterval = 0.4; // Slower reactions
-    } else if (difficulty === 'medium') {
-      this.aggression = 0.5 + Math.random() * 0.4; // 0.5 - 0.9
-      this.caution = 0.3 + Math.random() * 0.3; // 0.3 - 0.6
-      this.maxTailLength = 20 + Math.floor(Math.random() * 30); // 20-50
-      this.expansionDistance = 100 + Math.random() * 150; // 100-250
-      this.humanFocus = 0.6; // Frequent human targeting
-      this.decisionInterval = 0.25; // Faster reactions
-    } else { // hard
+    } else if (difficulty === 'hard') {
       this.aggression = 0.8 + Math.random() * 0.2; // 0.8 - 1.0
       this.caution = 0.2 + Math.random() * 0.2; // 0.2 - 0.4 (bold)
       this.maxTailLength = 30 + Math.floor(Math.random() * 40); // 30-70
       this.expansionDistance = 150 + Math.random() * 200; // 150-350
       this.humanFocus = 0.95; // Almost always target human
       this.decisionInterval = 0.15; // Very fast reactions
+    } else { // impossible
+      this.aggression = 1.0; // Maximum aggression
+      this.caution = 0.1 + Math.random() * 0.1; // 0.1 - 0.2 (very bold)
+      this.maxTailLength = 50 + Math.floor(Math.random() * 50); // 50-100
+      this.expansionDistance = 200 + Math.random() * 250; // 200-450
+      this.humanFocus = 1.0; // Always target human
+      this.decisionInterval = 0.1; // Instant reactions
     }
 
     this.pickNewTarget();
@@ -279,9 +279,9 @@ export class BotAI {
     let bestScore = 0;
     const humanPlayer = this.allPlayers.find(p => p.id === 1);
 
-    // Hard mode: Almost always target human if they exist and are alive
-    if (this.difficulty === 'hard' && humanPlayer?.alive) {
-      // On hard, bots coordinate - if human has ANY tail, go for them
+    // Hard/Impossible mode: Almost always target human if they exist and are alive
+    if ((this.difficulty === 'hard' || this.difficulty === 'impossible') && humanPlayer?.alive) {
+      // On hard/impossible, bots coordinate - if human has ANY tail, go for them
       if (humanPlayer.tail.length > 0 || Math.random() < this.humanFocus) {
         return humanPlayer;
       }
@@ -290,13 +290,14 @@ export class BotAI {
     for (const other of this.allPlayers) {
       if (!other.alive || other.id === this.player.id) continue;
 
-      // Hard mode: Bots avoid targeting each other most of the time
-      if (this.difficulty === 'hard' && other.id !== 1) {
-        if (Math.random() > 0.1) continue; // 90% chance to skip other bots
+      // Hard/Impossible mode: Bots avoid targeting each other most of the time
+      if ((this.difficulty === 'hard' || this.difficulty === 'impossible') && other.id !== 1) {
+        const skipChance = this.difficulty === 'impossible' ? 0.95 : 0.9; // 95% or 90% chance to skip other bots
+        if (Math.random() < skipChance) continue;
       }
 
       const dist = this.getDistanceTo(other);
-      const maxRange = this.difficulty === 'hard' ? 800 : 600;
+      const maxRange = this.difficulty === 'impossible' ? 1000 : this.difficulty === 'hard' ? 800 : 600;
       if (dist > maxRange) continue;
 
       let score = 0;
@@ -322,12 +323,12 @@ export class BotAI {
 
       // Prioritize human player - amount varies by difficulty
       if (other.id === 1) {
-        const humanBonus = this.difficulty === 'hard' ? 200 :
-                          this.difficulty === 'medium' ? 80 : 50;
+        const humanBonus = this.difficulty === 'impossible' ? 300 :
+                          this.difficulty === 'hard' ? 200 : 50;
         score += humanBonus;
         // Extra bonus if human has any tail at all
         if (other.tail.length > 0) {
-          score += this.difficulty === 'hard' ? 100 : 30;
+          score += (this.difficulty === 'hard' || this.difficulty === 'impossible') ? 100 : 30;
         }
       }
 
@@ -345,8 +346,8 @@ export class BotAI {
     }
 
     // Threshold varies by difficulty
-    const threshold = this.difficulty === 'hard' ? 10 :
-                     this.difficulty === 'medium' ? 20 : 25;
+    const threshold = this.difficulty === 'impossible' ? 5 :
+                     this.difficulty === 'hard' ? 10 : 25;
     return bestScore > threshold ? bestTarget : null;
   }
 
@@ -655,16 +656,16 @@ export class BotAI {
     if (this.player.tail.length < 5) return;
 
     // Look ahead distance varies by difficulty
-    const lookAhead = this.difficulty === 'hard' ? 100 :
-                     this.difficulty === 'medium' ? 80 : 60;
-    const collisionRadius = this.difficulty === 'hard' ? 50 :
-                           this.difficulty === 'medium' ? 40 : 35;
+    const lookAhead = this.difficulty === 'impossible' ? 120 :
+                     this.difficulty === 'hard' ? 100 : 60;
+    const collisionRadius = this.difficulty === 'impossible' ? 60 :
+                           this.difficulty === 'hard' ? 50 : 35;
 
     const futureX = this.player.pos.x + this.player.dir.x * lookAhead;
     const futureY = this.player.pos.y + this.player.dir.y * lookAhead;
 
-    // Hard mode: Check multiple lookahead distances
-    const checkDistances = this.difficulty === 'hard' ? [30, 60, 100, 150] : [lookAhead];
+    // Hard/Impossible mode: Check multiple lookahead distances
+    const checkDistances = (this.difficulty === 'hard' || this.difficulty === 'impossible') ? [30, 60, 100, 150] : [lookAhead];
 
     for (const checkDist of checkDistances) {
       const checkX = this.player.pos.x + this.player.dir.x * checkDist;
@@ -698,8 +699,8 @@ export class BotAI {
       }
     }
 
-    // Hard mode: Also check line segments between tail points for more precise avoidance
-    if (this.difficulty === 'hard' || this.difficulty === 'medium') {
+    // Hard/Impossible mode: Also check line segments between tail points for more precise avoidance
+    if (this.difficulty === 'hard' || this.difficulty === 'impossible') {
       for (let i = 0; i < this.player.tail.length - 5; i++) {
         const p1 = this.player.tail[i];
         const p2 = this.player.tail[i + 1];

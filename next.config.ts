@@ -1,7 +1,12 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  output: 'export',
+  basePath: '/paper-maner-io-2',
+  assetPrefix: '/paper-maner-io-2/',
+  images: {
+    unoptimized: true,
+  },
 };
 
 export default nextConfig;

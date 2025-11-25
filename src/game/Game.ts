@@ -83,8 +83,20 @@ export class Game {
 
   // Power-up state (every 3rd kill) - per player
   private boostEndTimes: Map<number, number> = new Map(); // playerId -> boost end time
-  private readonly boostDuration: number = 3000; // 3 seconds
+  private readonly boostDuration: number = 5000; // 5 seconds
   private readonly boostSpeedMultiplier: number = 1.5; // 50% faster
+
+  // Boost pickup items on the map
+  private boostPickups: { x: number; y: number; spawnTime: number }[] = [];
+  private readonly boostPickupRadius: number = 15; // collision radius
+  private readonly boostPickupSpawnInterval: number = 8000; // spawn new one every 8 seconds
+  private readonly maxBoostPickups: number = 5; // max on map at once
+  private lastBoostPickupSpawn: number = 0;
+
+  // How to Play popup state
+  private showHowToPlay: boolean = false;
+  private howToPlayButton: { x: number; y: number; w: number; h: number } | null = null;
+  private closeHowToPlayButton: { x: number; y: number; w: number; h: number } | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -316,6 +328,28 @@ export class Game {
    * Handle click/tap on game over screen - check for difficulty button clicks
    */
   private handleGameOverClick(clickX: number, clickY: number): void {
+    // Check if How to Play popup is open
+    if (this.showHowToPlay) {
+      // Check close button
+      if (this.closeHowToPlayButton &&
+          clickX >= this.closeHowToPlayButton.x && clickX <= this.closeHowToPlayButton.x + this.closeHowToPlayButton.w &&
+          clickY >= this.closeHowToPlayButton.y && clickY <= this.closeHowToPlayButton.y + this.closeHowToPlayButton.h) {
+        this.showHowToPlay = false;
+        return;
+      }
+      // Click anywhere else closes popup too
+      this.showHowToPlay = false;
+      return;
+    }
+
+    // Check How to Play button
+    if (this.howToPlayButton &&
+        clickX >= this.howToPlayButton.x && clickX <= this.howToPlayButton.x + this.howToPlayButton.w &&
+        clickY >= this.howToPlayButton.y && clickY <= this.howToPlayButton.y + this.howToPlayButton.h) {
+      this.showHowToPlay = true;
+      return;
+    }
+
     // Check if a difficulty button was clicked
     for (const btn of this.difficultyButtons) {
       if (clickX >= btn.x && clickX <= btn.x + btn.w &&
@@ -475,6 +509,8 @@ export class Game {
     // Reset boost state
     this.boostEndTimes.clear();
     this.boostNotifications = [];
+    this.boostPickups = [];
+    this.lastBoostPickupSpawn = 0;
     this.maxTerritoryPercent = 0;
 
     // Reset camera
@@ -595,10 +631,16 @@ export class Game {
       if (bot.player.alive) {
         bot.update(dt);
 
-        // Apply speed boost if bot has it
+        // Apply speed boost if bot has it, and 2x speed in impossible mode
         const originalBotSpeed = bot.player.speed;
+        let baseSpeed = gameConfig.bot.baseSpeed;
+        if (this.difficulty === 'impossible') {
+          baseSpeed *= 2; // Bots are 2x faster in impossible mode
+        }
         if (this.isPlayerBoosted(bot.player.id)) {
-          bot.player.speed = gameConfig.bot.baseSpeed * this.boostSpeedMultiplier;
+          bot.player.speed = baseSpeed * this.boostSpeedMultiplier;
+        } else {
+          bot.player.speed = baseSpeed;
         }
 
         bot.player.update(dt);
@@ -621,6 +663,9 @@ export class Game {
     // Check for collisions between players and other players' tails
     this.checkAllTailCollisions();
 
+    // Update boost pickups (spawn new ones and check collisions)
+    this.updateBoostPickups();
+
     // Process queued captures with time budget (async-style)
     this.processQueuedCaptures();
 
@@ -634,6 +679,95 @@ export class Game {
     this.checkGameEndConditions();
 
     this.updateCamera();
+  }
+
+  /**
+   * Update boost pickups - spawn new ones and check for player collisions
+   */
+  private updateBoostPickups(): void {
+    const now = performance.now();
+
+    // Spawn new boost pickup periodically
+    if (this.boostPickups.length < this.maxBoostPickups &&
+        now - this.lastBoostPickupSpawn > this.boostPickupSpawnInterval) {
+      this.spawnBoostPickup();
+      this.lastBoostPickupSpawn = now;
+    }
+
+    // Check collisions with all players
+    for (const player of this.allPlayers) {
+      if (!player.alive) continue;
+
+      for (let i = this.boostPickups.length - 1; i >= 0; i--) {
+        const pickup = this.boostPickups[i];
+        const dx = player.pos.x - pickup.x;
+        const dy = player.pos.y - pickup.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist < this.boostPickupRadius + gameConfig.player.radius) {
+          // Player collected the boost!
+          this.boostPickups.splice(i, 1);
+          this.activateBoost(player.id);
+          if (player.id === 1) {
+            console.log('You collected a boost pickup!');
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Spawn a new boost pickup at a random location
+   */
+  private spawnBoostPickup(): void {
+    const margin = 100;
+    const arenaW = derivedConfig.arenaWidthPx;
+    const arenaH = derivedConfig.arenaHeightPx;
+
+    // Find a random location not too close to existing pickups or players
+    let attempts = 0;
+    const maxAttempts = 20;
+
+    while (attempts < maxAttempts) {
+      const x = margin + Math.random() * (arenaW - margin * 2);
+      const y = margin + Math.random() * (arenaH - margin * 2);
+
+      // Check distance from players
+      let tooClose = false;
+      for (const player of this.allPlayers) {
+        if (!player.alive) continue;
+        const dx = player.pos.x - x;
+        const dy = player.pos.y - y;
+        if (Math.sqrt(dx * dx + dy * dy) < 150) {
+          tooClose = true;
+          break;
+        }
+      }
+
+      // Check distance from other pickups
+      if (!tooClose) {
+        for (const pickup of this.boostPickups) {
+          const dx = pickup.x - x;
+          const dy = pickup.y - y;
+          if (Math.sqrt(dx * dx + dy * dy) < 100) {
+            tooClose = true;
+            break;
+          }
+        }
+      }
+
+      if (!tooClose) {
+        this.boostPickups.push({ x, y, spawnTime: performance.now() });
+        return;
+      }
+
+      attempts++;
+    }
+
+    // Fallback - just spawn it anyway
+    const x = margin + Math.random() * (arenaW - margin * 2);
+    const y = margin + Math.random() * (arenaH - margin * 2);
+    this.boostPickups.push({ x, y, spawnTime: performance.now() });
   }
 
   /**
@@ -739,10 +873,13 @@ export class Game {
         if (campingTime > gameConfig.shrink.campingThreshold) {
           shrinkAccum += dt;
 
-          // Calculate tiles to remove this frame
-          const tilesToRemove = Math.floor(shrinkAccum * gameConfig.shrink.rate);
+          // Calculate tiles to remove this frame (2x faster in impossible mode)
+          const shrinkRate = this.difficulty === 'impossible'
+            ? gameConfig.shrink.rate * 2
+            : gameConfig.shrink.rate;
+          const tilesToRemove = Math.floor(shrinkAccum * shrinkRate);
           if (tilesToRemove > 0) {
-            shrinkAccum -= tilesToRemove / gameConfig.shrink.rate;
+            shrinkAccum -= tilesToRemove / shrinkRate;
             this.shrinkTerritory(playerId, tilesToRemove);
           }
         }
@@ -1236,9 +1373,17 @@ export class Game {
     const isHuman = player.id === 1;
 
     if (killer) {
-      // Killed by another player - transfer territory and stay DEAD permanently
-      this.territoryMap.transferTerritory(player.id, killer.id);
-      console.log(`Player ${killer.id} killed Player ${player.id} and took their territory!`);
+      // Killed by another player - transfer territory (except human in impossible mode)
+      // In impossible mode, human player doesn't inherit enemy territory
+      if (this.difficulty === 'impossible' && killer.id === 1) {
+        // Human killed someone in impossible mode - clear victim's territory instead
+        this.territoryMap.clearOwnerTerritory(player.id);
+        console.log(`Player ${killer.id} killed Player ${player.id} but gets no territory (Impossible mode)!`);
+      } else {
+        // Normal mode - transfer territory
+        this.territoryMap.transferTerritory(player.id, killer.id);
+        console.log(`Player ${killer.id} killed Player ${player.id} and took their territory!`);
+      }
 
       // Add kill feedback effect
       this.addKillEffect(player.pos.x, player.pos.y);
@@ -1342,6 +1487,9 @@ export class Game {
 
     // Draw arena border (if visible)
     this.drawArenaBorder();
+
+    // Draw boost pickups
+    this.drawBoostPickups();
 
     // Draw all player tails
     for (const player of this.allPlayers) {
@@ -1485,20 +1633,9 @@ export class Game {
     ctx.fillText('Easy', easyX + btnWidth / 2, btnY + 26);
     this.difficultyButtons.push({ x: easyX, y: btnY, w: btnWidth, h: btnHeight, difficulty: 'easy' });
 
-    // Medium button (yellow/orange)
-    const mediumX = btnStartX + btnWidth + btnSpacing;
+    // Hard button (orange)
+    const hardX = btnStartX + btnWidth + btnSpacing;
     ctx.fillStyle = '#f59e0b';
-    ctx.beginPath();
-    ctx.roundRect(mediumX, btnY, btnWidth, btnHeight, 8);
-    ctx.fill();
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 16px monospace';
-    ctx.fillText('Medium', mediumX + btnWidth / 2, btnY + 26);
-    this.difficultyButtons.push({ x: mediumX, y: btnY, w: btnWidth, h: btnHeight, difficulty: 'medium' });
-
-    // Hard button (red)
-    const hardX = btnStartX + (btnWidth + btnSpacing) * 2;
-    ctx.fillStyle = '#ef4444';
     ctx.beginPath();
     ctx.roundRect(hardX, btnY, btnWidth, btnHeight, 8);
     ctx.fill();
@@ -1507,14 +1644,267 @@ export class Game {
     ctx.fillText('Hard', hardX + btnWidth / 2, btnY + 26);
     this.difficultyButtons.push({ x: hardX, y: btnY, w: btnWidth, h: btnHeight, difficulty: 'hard' });
 
+    // Impossible button (red/purple)
+    const impossibleX = btnStartX + (btnWidth + btnSpacing) * 2;
+    ctx.fillStyle = '#9333ea';
+    ctx.beginPath();
+    ctx.roundRect(impossibleX, btnY, btnWidth, btnHeight, 8);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText('Impossible', impossibleX + btnWidth / 2, btnY + 26);
+    this.difficultyButtons.push({ x: impossibleX, y: btnY, w: btnWidth, h: btnHeight, difficulty: 'impossible' });
+
     // Difficulty description
     ctx.fillStyle = '#64748b';
     ctx.font = '12px monospace';
     ctx.textAlign = 'center';
     ctx.fillText('Select difficulty to play again', centerX, panelY + panelHeight - 20);
 
+    // How to Play button (small, top right of panel)
+    const howToPlayBtnW = 30;
+    const howToPlayBtnH = 30;
+    const howToPlayBtnX = panelX + panelWidth - howToPlayBtnW - 10;
+    const howToPlayBtnY = panelY + 10;
+    this.howToPlayButton = { x: howToPlayBtnX, y: howToPlayBtnY, w: howToPlayBtnW, h: howToPlayBtnH };
+
+    ctx.fillStyle = '#3b82f6';
+    ctx.beginPath();
+    ctx.roundRect(howToPlayBtnX, howToPlayBtnY, howToPlayBtnW, howToPlayBtnH, 6);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 18px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('?', howToPlayBtnX + howToPlayBtnW / 2, howToPlayBtnY + 22);
+
+    // Draw How to Play popup if open
+    if (this.showHowToPlay) {
+      this.drawHowToPlayPopup();
+    }
+
     // Reset text alignment
     ctx.textAlign = 'left';
+  }
+
+  /**
+   * Draw the How to Play popup overlay
+   */
+  private drawHowToPlayPopup(): void {
+    const { ctx } = this;
+    const centerX = this.viewportWidth / 2;
+    const centerY = this.viewportHeight / 2;
+
+    // Popup dimensions
+    const popupWidth = 500;
+    const popupHeight = 480;
+    const popupX = centerX - popupWidth / 2;
+    const popupY = centerY - popupHeight / 2;
+
+    // Darker backdrop
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.fillRect(0, 0, this.viewportWidth, this.viewportHeight);
+
+    // Popup background
+    ctx.fillStyle = 'rgba(30, 41, 59, 0.98)';
+    ctx.strokeStyle = '#3b82f6';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.roundRect(popupX, popupY, popupWidth, popupHeight, 12);
+    ctx.fill();
+    ctx.stroke();
+
+    // Title
+    ctx.fillStyle = '#3b82f6';
+    ctx.font = 'bold 32px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('HOW TO PLAY', centerX, popupY + 45);
+
+    // Close button
+    const closeBtnW = 30;
+    const closeBtnH = 30;
+    const closeBtnX = popupX + popupWidth - closeBtnW - 10;
+    const closeBtnY = popupY + 10;
+    this.closeHowToPlayButton = { x: closeBtnX, y: closeBtnY, w: closeBtnW, h: closeBtnH };
+
+    ctx.fillStyle = '#ef4444';
+    ctx.beginPath();
+    ctx.roundRect(closeBtnX, closeBtnY, closeBtnW, closeBtnH, 6);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 20px monospace';
+    ctx.fillText('X', closeBtnX + closeBtnW / 2, closeBtnY + 22);
+
+    // Content sections
+    let y = popupY + 80;
+    const lineHeight = 22;
+    const sectionGap = 15;
+
+    ctx.textAlign = 'left';
+
+    // Controls section
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 16px monospace';
+    ctx.fillText('CONTROLS', popupX + 25, y);
+    y += lineHeight;
+
+    ctx.fillStyle = '#e2e8f0';
+    ctx.font = '14px monospace';
+    const controls = [
+      'Desktop: Mouse aims direction, WASD/Arrows to steer',
+      'Mobile: Swipe to set direction',
+      'You always move forward automatically'
+    ];
+    for (const line of controls) {
+      ctx.fillText(line, popupX + 25, y);
+      y += lineHeight;
+    }
+
+    y += sectionGap;
+
+    // Gameplay section
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 16px monospace';
+    ctx.fillText('GAMEPLAY', popupX + 25, y);
+    y += lineHeight;
+
+    ctx.fillStyle = '#e2e8f0';
+    ctx.font = '14px monospace';
+    const gameplay = [
+      'Leave your territory to draw a tail',
+      'Return home to capture the enclosed area',
+      'Cross enemy tails to eliminate them and steal territory',
+      'Avoid hitting your own tail or walls!',
+      'Stay outside your base - camping shrinks your land'
+    ];
+    for (const line of gameplay) {
+      ctx.fillText(line, popupX + 25, y);
+      y += lineHeight;
+    }
+
+    y += sectionGap;
+
+    // Power-ups section
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 16px monospace';
+    ctx.fillText('POWER-UPS', popupX + 25, y);
+    y += lineHeight;
+
+    ctx.fillStyle = '#e2e8f0';
+    ctx.font = '14px monospace';
+    const powerups = [
+      'Collect yellow lightning orbs for 5s speed boost',
+      'Every 3 kills also grants a 5s speed boost'
+    ];
+    for (const line of powerups) {
+      ctx.fillText(line, popupX + 25, y);
+      y += lineHeight;
+    }
+
+    y += sectionGap;
+
+    // Difficulty section
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 16px monospace';
+    ctx.fillText('DIFFICULTY MODES', popupX + 25, y);
+    y += lineHeight;
+
+    ctx.fillStyle = '#22c55e';
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText('Easy:', popupX + 25, y);
+    ctx.fillStyle = '#e2e8f0';
+    ctx.font = '14px monospace';
+    ctx.fillText('Slower bots, lower aggression', popupX + 85, y);
+    y += lineHeight;
+
+    ctx.fillStyle = '#f59e0b';
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText('Hard:', popupX + 25, y);
+    ctx.fillStyle = '#e2e8f0';
+    ctx.font = '14px monospace';
+    ctx.fillText('Fast reactions, bots hunt you', popupX + 85, y);
+    y += lineHeight;
+
+    ctx.fillStyle = '#9333ea';
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText('Impossible:', popupX + 25, y);
+    ctx.fillStyle = '#e2e8f0';
+    ctx.font = '14px monospace';
+    ctx.fillText('2x bot speed, 2x shrink, no territory on kills', popupX + 130, y);
+
+    // Footer
+    ctx.fillStyle = '#64748b';
+    ctx.font = '12px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('Click anywhere to close', centerX, popupY + popupHeight - 20);
+  }
+
+  /**
+   * Draw boost pickup items on the map
+   */
+  private drawBoostPickups(): void {
+    const { ctx } = this;
+    const now = performance.now();
+
+    for (const pickup of this.boostPickups) {
+      // Convert to screen coords
+      const screenX = pickup.x - this.cameraX;
+      const screenY = pickup.y - this.cameraY;
+
+      // Skip if off-screen
+      if (screenX < -30 || screenX > this.viewportWidth + 30 ||
+          screenY < -30 || screenY > this.viewportHeight + 30) {
+        continue;
+      }
+
+      // Animated pulsing effect
+      const age = now - pickup.spawnTime;
+      const pulse = 1 + Math.sin(age / 200) * 0.15;
+      const radius = this.boostPickupRadius * pulse;
+
+      // Outer glow
+      const gradient = ctx.createRadialGradient(screenX, screenY, 0, screenX, screenY, radius * 2);
+      gradient.addColorStop(0, 'rgba(255, 215, 0, 0.6)');
+      gradient.addColorStop(0.5, 'rgba(255, 165, 0, 0.3)');
+      gradient.addColorStop(1, 'rgba(255, 100, 0, 0)');
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.arc(screenX, screenY, radius * 2, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Main circle (lightning bolt yellow)
+      ctx.fillStyle = '#fbbf24';
+      ctx.beginPath();
+      ctx.arc(screenX, screenY, radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Inner highlight
+      ctx.fillStyle = '#fef3c7';
+      ctx.beginPath();
+      ctx.arc(screenX - radius * 0.2, screenY - radius * 0.2, radius * 0.4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Lightning bolt icon
+      ctx.save();
+      ctx.translate(screenX, screenY);
+      ctx.fillStyle = '#7c2d12';
+      ctx.beginPath();
+      ctx.moveTo(-3, -8);
+      ctx.lineTo(2, -2);
+      ctx.lineTo(-1, -2);
+      ctx.lineTo(3, 8);
+      ctx.lineTo(-2, 2);
+      ctx.lineTo(1, 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+
+      // Border
+      ctx.strokeStyle = '#d97706';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(screenX, screenY, radius, 0, Math.PI * 2);
+      ctx.stroke();
+    }
   }
 
   /**
