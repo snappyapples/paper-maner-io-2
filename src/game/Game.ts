@@ -6,7 +6,8 @@ import { gameConfig, derivedConfig } from './gameConfig';
 
 /**
  * Main Game class - handles game loop, rendering, and input
- * Player ALWAYS moves forward; mouse/arrow keys steer direction
+ * Player ALWAYS moves forward; mouse/arrow keys/touch swipe steer direction
+ * v1.1 - Mobile optimization with swipe controls
  */
 export class Game {
   private canvas: HTMLCanvasElement;
