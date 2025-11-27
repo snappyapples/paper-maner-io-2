@@ -351,9 +351,11 @@ export class Game {
     }
 
     // Check if a difficulty button was clicked
+    console.log('[DEBUG] handleGameOverClick:', { clickX, clickY, buttons: this.difficultyButtons.map(b => ({ ...b })) });
     for (const btn of this.difficultyButtons) {
       if (clickX >= btn.x && clickX <= btn.x + btn.w &&
           clickY >= btn.y && clickY <= btn.y + btn.h) {
+        console.log('[DEBUG] Difficulty button clicked:', btn.difficulty);
         this.difficulty = btn.difficulty;
         this.restartGame();
         return;
@@ -361,6 +363,7 @@ export class Game {
     }
 
     // If no button was clicked, still restart with current difficulty
+    console.log('[DEBUG] No button hit, restarting with current difficulty:', this.difficulty);
     this.restartGame();
   }
 
@@ -497,6 +500,7 @@ export class Game {
     // Reset and regenerate all bots
     this.bots = [];
     this.allPlayers = [this.player];
+    console.log('[DEBUG] restartGame - creating bots with difficulty:', this.difficulty);
     this.createBots(gameConfig.bot.count);
 
     // Give bots awareness of all players
@@ -516,7 +520,7 @@ export class Game {
     // Reset camera
     this.updateCamera(1);
 
-    console.log('Game restarted!');
+    console.log('[DEBUG] Game restarted with difficulty:', this.difficulty);
   }
 
   /**
@@ -1143,12 +1147,8 @@ export class Game {
             this.handlePlayerDeath(victim, attacker);
             attacker.kills++;
 
-            // Activate boost on kills
-            // Impossible mode: human gets boost on EVERY kill
-            // Normal modes: boost on every 3rd kill (for any player)
-            if (this.difficulty === 'impossible' && attacker.id === 1) {
-              this.activateBoost(attacker.id);
-            } else if (attacker.kills % 3 === 0) {
+            // Activate boost on every 3rd kill (for any player, any difficulty)
+            if (attacker.kills % 3 === 0) {
               this.activateBoost(attacker.id);
             }
             break;
@@ -2273,6 +2273,21 @@ export class Game {
 
     // Top bar - Territory control
     this.drawTerritoryBar();
+
+    // Difficulty indicator (top-left, below territory bar) - DEBUG
+    if (this.difficulty !== 'easy') {
+      const diffColor = this.difficulty === 'impossible' ? '#ef4444' : '#f59e0b';
+      const diffText = this.difficulty.toUpperCase();
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      ctx.beginPath();
+      ctx.roundRect(10, 55, this.isMobile ? 80 : 100, this.isMobile ? 22 : 28, 6);
+      ctx.fill();
+      ctx.fillStyle = diffColor;
+      ctx.font = this.isMobile ? 'bold 12px monospace' : 'bold 14px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(diffText, this.isMobile ? 50 : 60, this.isMobile ? 70 : 75);
+      ctx.textAlign = 'left';
+    }
 
     // Right side - Bot/enemy list
     this.drawBotList();
