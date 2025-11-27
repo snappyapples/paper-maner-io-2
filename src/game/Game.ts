@@ -310,14 +310,20 @@ export class Game {
   private handleTouchStart(e: TouchEvent): void {
     e.preventDefault();
 
+    const touch = e.touches[0];
+    // Transform touch coordinates to canvas coordinates (handles scaling)
+    const rect = this.canvas.getBoundingClientRect();
+    const scaleX = this.canvas.width / rect.width;
+    const scaleY = this.canvas.height / rect.height;
+    const canvasX = (touch.clientX - rect.left) * scaleX;
+    const canvasY = (touch.clientY - rect.top) * scaleY;
+
     // Handle game over restart with tap (check for button clicks)
     if (this.gameOver) {
-      const touch = e.touches[0];
-      this.handleGameOverClick(touch.clientX, touch.clientY);
+      this.handleGameOverClick(canvasX, canvasY);
       return;
     }
 
-    const touch = e.touches[0];
     this.touchStartX = touch.clientX;
     this.touchStartY = touch.clientY;
     this.useTouchSteering = true;
@@ -351,7 +357,13 @@ export class Game {
     }
 
     // Check if a difficulty button was clicked
-    console.log('[DEBUG] handleGameOverClick:', { clickX, clickY, buttons: this.difficultyButtons.map(b => ({ ...b })) });
+    console.log('[DEBUG] handleGameOverClick:', {
+      clickX, clickY,
+      viewportW: this.viewportWidth, viewportH: this.viewportHeight,
+      canvasW: this.canvas.width, canvasH: this.canvas.height,
+      isMobile: this.isMobile,
+      buttons: this.difficultyButtons.map(b => ({ ...b }))
+    });
     for (const btn of this.difficultyButtons) {
       if (clickX >= btn.x && clickX <= btn.x + btn.w &&
           clickY >= btn.y && clickY <= btn.y + btn.h) {
