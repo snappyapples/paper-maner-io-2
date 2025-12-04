@@ -1,5 +1,38 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Maskable icons need safe zone - content in center 80% -->
+  <!-- Background fills entire area -->
   <rect width="512" height="512" fill="#3b82f6"/>
-  <polygon points="256,96 400,176 400,336 256,416 112,336 112,176" fill="#2c3e50" stroke="#93c5fd" stroke-width="6"/>
-  <polygon points="256,136 360,196 360,316 256,376 152,316 152,196" fill="#3b82f6" opacity="0.5"/>
+
+  <!-- Territory blob (slightly smaller for safe zone) -->
+  <path d="M256,102
+           C320,102 375,138 395,190
+           C412,242 405,305 375,350
+           C345,392 305,410 256,410
+           C207,410 167,392 137,350
+           C107,305 100,242 117,190
+           C137,138 192,102 256,102 Z"
+        fill="#2c3e50"
+        stroke="#93c5fd"
+        stroke-width="4"/>
+
+  <!-- Inner territory shading -->
+  <path d="M256,135
+           C305,135 345,160 360,200
+           C372,240 367,290 342,325
+           C320,358 290,375 256,375
+           C222,375 192,358 170,325
+           C145,290 140,240 152,200
+           C167,160 207,135 256,135 Z"
+        fill="#3b82f6"
+        opacity="0.4"/>
+
+  <!-- Player hexagon in center -->
+  <polygon points="256,195 296,218 296,272 256,295 216,272 216,218"
+           fill="#93c5fd"
+           stroke="#ffffff"
+           stroke-width="3"/>
+
+  <!-- Player inner detail -->
+  <polygon points="256,212 282,228 282,262 256,278 230,262 230,228"
+           fill="#2c3e50"/>
 </svg>

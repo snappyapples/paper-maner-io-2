@@ -1,5 +1,37 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Background -->
   <rect width="512" height="512" fill="#2c3e50"/>
-  <polygon points="256,64 432,160 432,352 256,448 80,352 80,160" fill="#3b82f6" stroke="#93c5fd" stroke-width="8"/>
-  <polygon points="256,112 384,176 384,336 256,400 128,336 128,176" fill="#2c3e50" opacity="0.3"/>
+
+  <!-- Territory blob (organic irregular shape like starting land) -->
+  <path d="M256,64
+           C340,64 410,110 435,180
+           C455,250 445,330 400,395
+           C360,448 310,468 256,468
+           C200,468 150,448 112,395
+           C67,330 57,250 77,180
+           C102,110 172,64 256,64 Z"
+        fill="#3b82f6"
+        stroke="#93c5fd"
+        stroke-width="6"/>
+
+  <!-- Inner territory shading -->
+  <path d="M256,110
+           C320,110 375,145 395,200
+           C412,255 405,320 370,370
+           C340,410 300,430 256,430
+           C212,430 172,410 142,370
+           C107,320 100,255 117,200
+           C137,145 192,110 256,110 Z"
+        fill="#2c3e50"
+        opacity="0.25"/>
+
+  <!-- Player hexagon in center -->
+  <polygon points="256,180 304,208 304,272 256,300 208,272 208,208"
+           fill="#93c5fd"
+           stroke="#ffffff"
+           stroke-width="4"/>
+
+  <!-- Player inner detail -->
+  <polygon points="256,200 288,220 288,260 256,280 224,260 224,220"
+           fill="#3b82f6"/>
 </svg>
