@@ -356,6 +356,15 @@ export class Game {
       return;
     }
 
+    // Check if an other games link was clicked
+    for (const link of this.otherGamesLinks) {
+      if (clickX >= link.x && clickX <= link.x + link.w &&
+          clickY >= link.y && clickY <= link.y + link.h) {
+        window.open(link.url, '_blank');
+        return;
+      }
+    }
+
     // Check if a difficulty button was clicked
     console.log('[DEBUG] handleGameOverClick:', {
       clickX, clickY,
@@ -1548,6 +1557,7 @@ export class Game {
 
   // Store button positions for click detection
   private difficultyButtons: { x: number; y: number; w: number; h: number; difficulty: Difficulty }[] = [];
+  private otherGamesLinks: { x: number; y: number; w: number; h: number; url: string }[] = [];
 
   /**
    * Draw the victory or defeat overlay
@@ -1701,6 +1711,42 @@ export class Game {
     ctx.font = this.isMobile ? '10px monospace' : '12px monospace';
     ctx.textAlign = 'center';
     ctx.fillText('Select difficulty to play again', centerX, panelY + panelHeight - (this.isMobile ? 15 : 20));
+
+    // Other games links (below panel)
+    this.otherGamesLinks = [];
+    const linksY = panelY + panelHeight + (this.isMobile ? 20 : 30);
+    const linkFont = this.isMobile ? '11px monospace' : '13px monospace';
+    ctx.font = linkFont;
+    ctx.fillStyle = '#64748b';
+    const moreText = 'More: ';
+    const moreWidth = ctx.measureText(moreText).width;
+    const bankitText = 'BankIt';
+    const bankitWidth = ctx.measureText(bankitText).width;
+    const separator = ' | ';
+    const sepWidth = ctx.measureText(separator).width;
+    const cubeText = 'CubeBluff';
+    const cubeWidth = ctx.measureText(cubeText).width;
+    const totalWidth = moreWidth + bankitWidth + sepWidth + cubeWidth;
+    const startX = centerX - totalWidth / 2;
+
+    // Draw "More: " label
+    ctx.fillText(moreText, startX, linksY);
+
+    // Draw BankIt link
+    const bankitX = startX + moreWidth;
+    ctx.fillStyle = '#94a3b8';
+    ctx.fillText(bankitText, bankitX, linksY);
+    this.otherGamesLinks.push({ x: bankitX, y: linksY - 12, w: bankitWidth, h: 16, url: 'https://bankitgame.vercel.app/' });
+
+    // Draw separator
+    ctx.fillStyle = '#64748b';
+    ctx.fillText(separator, bankitX + bankitWidth, linksY);
+
+    // Draw CubeBluff link
+    const cubeX = bankitX + bankitWidth + sepWidth;
+    ctx.fillStyle = '#94a3b8';
+    ctx.fillText(cubeText, cubeX, linksY);
+    this.otherGamesLinks.push({ x: cubeX, y: linksY - 12, w: cubeWidth, h: 16, url: 'https://cubebluff.vercel.app/' });
 
     // How to Play button (small, top right of panel) - responsive for mobile
     const howToPlayBtnW = this.isMobile ? 26 : 30;
